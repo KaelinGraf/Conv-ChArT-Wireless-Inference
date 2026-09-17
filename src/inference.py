@@ -9,6 +9,7 @@ import yaml
 rt.preload_dlls()
 
 PREFERRED_CUDA_DEVICE = 0
+PINNED_CFG = "cfg/cfg.yaml"
 
 _ORT_TO_NP_DTYPE = {
     "tensor(float)": np.float32,
@@ -27,6 +28,7 @@ _ORT_TO_NP_DTYPE = {
 
 class onnx_session:
     def __init__(self, model_path:str):
+        assert model_path is not None, f"Model not found at {model_path}"
         self.session  = rt.InferenceSession(model_path,providers = ['CUDAExecutionProvider','CPUExecutionProvider'])
         self._i_list = self.session.get_inputs()
         self._o_list = self.session.get_outputs()
@@ -67,8 +69,11 @@ class onnx_session:
 class inference_pipeline:
     def __init__(self,config:str):
         with open(config,'r') as file:
-            _cfg = yaml.safe_load(file)
+            self._cfg = yaml.safe_load(file)
+        self._detector = onnx_session(self._cfg.get("MODEL",{}).get("detector",""))
+        self._refiner = onnx_session(self._cfg.get("MODEL",{}).get("refiner",""))
 
+    
         
 
 def _is_dynamic(i,o) -> bool:
@@ -78,6 +83,6 @@ def _is_dynamic(i,o) -> bool:
 
 
 def main():
-    onnx_session("checkpoints/detector_882k.onnx")
+    i = inference_pipeline(PINNED_CFG)
 if __name__ == "__main__":
     main()
