@@ -1,0 +1,14 @@
+{
+	"backtraceGraph" : 
+	{
+		"commands" : [],
+		"files" : [],
+		"nodes" : []
+	},
+	"installers" : [],
+	"paths" : 
+	{
+		"build" : "convchart_interfaces__py",
+		"source" : "/workspace/Conv-ChArT-Wireless-Inference/src/ros/build/convchart_interfaces/convchart_interfaces__py"
+	}
+}
