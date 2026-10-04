@@ -1,2 +1,5 @@
 __pycache__/
 trt_cache/
+src/ros/build/
+src/ros/install/
+src/ros/log/
