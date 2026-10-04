@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!--
+  CycloneDDS profile for the laptop <-> Raspberry Pi link over WiFi.
+  Selected through CYCLONEDDS_URI (docker/common/p4p-env.sh) in both containers,
+  so both ends run the same discovery rules. Reference:
+  https://cyclonedds.io/docs/cyclonedds/latest/config/config_file_reference.html
+-->
+<CycloneDDS xmlns="https://cdds.io/config"
+            xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+            xsi:schemaLocation="https://cdds.io/config https://raw.githubusercontent.com/eclipse-cyclonedds/cyclonedds/master/etc/cyclonedds.xsd">
+  <Domain Id="any">
+    <General>
+      <!-- Autodetect normally picks the default-route interface. If it grabs docker0 /
+           virbr0 instead of the WiFi NIC, name it explicitly, e.g.
+           <NetworkInterface name="wlp2s0" />  (laptop)  /  <NetworkInterface name="wlan0" /> (Pi) -->
+      <Interfaces>
+        <NetworkInterface autodetermine="true" priority="default" multicast="default" />
+      </Interfaces>
+      <!-- Multicast only for participant discovery; all sample traffic goes unicast.
+           Access points send multicast at the lowest basic rate and often drop it,
+           which is fatal for image topics. -->
+      <AllowMulticast>spdp</AllowMulticast>
+    </General>
+    <Discovery>
+      <!-- If discovery still does not cross the AP (client isolation, mesh WiFi),
+           list the other host(s) and discovery becomes unicast:
+      <Peers>
+        <Peer address="192.168.1.20" />
+      </Peers>
+      -->
+    </Discovery>
+    <Internal>
+      <!-- Large frames over a lossy link: bigger kernel receive buffers. Needs
+           net.core.rmem_max raised on the HOST (docker/host-setup*.sh does it;
+           host network mode means the container inherits it). -->
+      <SocketReceiveBufferSize min="10MB" />
+    </Internal>
+    <Tracing>
+      <Verbosity>warning</Verbosity>
+      <OutputFile>stderr</OutputFile>
+    </Tracing>
+  </Domain>
+</CycloneDDS>

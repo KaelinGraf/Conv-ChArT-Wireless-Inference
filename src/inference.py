@@ -46,7 +46,6 @@ _ORT_TO_NP_DTYPE: Final[dict[str, type[np.generic]]] = {
 }
 
 
-# --- configuration -----------------------------------------------------------
 
 @dataclass(frozen=True)
 class PipelineConfig:
@@ -84,7 +83,6 @@ class CameraConfig:
         return CameraConfig(K=K, dist=dist)
 
 
-# --- typed results -------------------------------------------------------------
 
 class Corner(TypedDict):
     x: float
@@ -162,8 +160,6 @@ class PnP(NamedTuple):
     rms_alt: float | None
     cov_alt: F64 | None
 
-
-# --- ONNX Runtime session with pre-bound GPU buffers -------------------------------
 
 class onnx_session:
     def __init__(self, model_path: str, batch: int | None = None) -> None:
@@ -419,8 +415,6 @@ def pose_covariance(obj: F64, rvec: F64, tvec: F64, K: F64, sigma_px: F64 | None
     except np.linalg.LinAlgError:
         return None
 
-
-# --- the engine ---------------------------------------------------------------------
 
 class inference_pipeline:
     def __init__(self, config: str) -> None:

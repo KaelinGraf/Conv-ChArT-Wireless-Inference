@@ -1,0 +1,47 @@
+# Raspberry Pi side of the Conv-ChArT wireless inference link (ROS 2 Jazzy, linux/arm64).
+#   on the Pi:  docker compose up -d pi && docker compose exec pi bash
+# Settings come from .env (copy .env.example). Full docs: docker/README.md
+name: convchart-wireless
+
+services:
+  # ---------------------------------------------------------------------------
+  # Raspberry Pi: streams camera frames to the laptop's inference node and gets
+  # poses back over WiFi, runs the fixed-rate Kalman filter, drives the Arduino
+  # Mega 2560 over USB serial.
+  # ---------------------------------------------------------------------------
+  pi:
+    build:
+      context: ./docker
+      dockerfile: pi/Dockerfile
+      args:
+        WITH_CAMERA: ${WITH_CAMERA:-0}
+        USER_UID: ${UID:-1000}
+        USER_GID: ${GID:-1000}
+    image: convchart-wireless/pi:jazzy
+    platform: linux/arm64     # native on the Pi; cross-built through QEMU on x86
+    container_name: convchart-pi
+    hostname: convchart-pi
+    network_mode: host        # DDS / zenoh discovery with the laptop needs the real LAN interface
+    stdin_open: true
+    tty: true
+    restart: unless-stopped
+    command: sleep infinity   # replace with `ros2 launch ...` once the nodes exist
+    environment:
+      ROS_DOMAIN_ID: ${ROS_DOMAIN_ID:-42}
+      RMW_IMPLEMENTATION: ${RMW_IMPLEMENTATION:-rmw_cyclonedds_cpp}
+      ROS_AUTOMATIC_DISCOVERY_RANGE: SUBNET
+    volumes:
+      - .:/workspace          # this repo; the shell env sources src/ros/install from here
+      - pi-home:/home/dev
+    devices:                  # Docker will not start the container if this device is missing
+      - ${ARDUINO_PORT:-/dev/ttyACM0}:/dev/ttyACM0
+    cap_add:
+      - SYS_NICE              # SCHED_FIFO / nice for the fixed-rate filter loop
+    ulimits:
+      rtprio: 99
+    # WITH_CAMERA=1 also needs the camera device nodes; the simplest working set is
+    #   privileged: true
+    #   volumes: [ /run/udev:/run/udev:ro ]   (libcamera enumerates through udev)
+
+volumes:
+  pi-home:
