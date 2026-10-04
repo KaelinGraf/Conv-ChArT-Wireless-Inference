@@ -1,6 +1,0 @@
-{
-  "package_name": "convchart_interfaces",
-  "non_idl_tuples": [
-    "/workspace/Conv-ChArT-Wireless-Inference/src/ros/src/convchart_interfaces:msg/InferenceResult.msg"
-  ]
-}

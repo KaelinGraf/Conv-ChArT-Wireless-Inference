@@ -1,4 +1,0 @@
-source;share/convchart_interfaces/local_setup.bash
-source;share/convchart_interfaces/local_setup.dsv
-source;share/convchart_interfaces/local_setup.sh
-source;share/convchart_interfaces/local_setup.zsh
