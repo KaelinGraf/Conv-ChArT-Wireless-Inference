@@ -46,6 +46,7 @@ _ORT_TO_NP_DTYPE: Final[dict[str, type[np.generic]]] = {
 }
 
 
+
 @dataclass(frozen=True)
 class PipelineConfig:
     tau_hm: float = 0.3
@@ -80,6 +81,7 @@ class CameraConfig:
         K = None if cam.get("K") is None else np.asarray(cam["K"], dtype=np.float64).reshape(3, 3)
         dist = None if cam.get("dist") is None else np.asarray(cam["dist"], dtype=np.float64).ravel()
         return CameraConfig(K=K, dist=dist)
+
 
 
 class Corner(TypedDict):
