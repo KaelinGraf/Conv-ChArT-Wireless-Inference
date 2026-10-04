@@ -3,7 +3,8 @@ from rclpy.node import Node
 from rclpy.qos import QoSProfile, QoSDurabilityPolicy, QoSReliabilityPolicy, QoSHistoryPolicy,QoSLivelinessPolicy
 from sensor_msgs.msg import Image
 from convchart_interfaces.msg import InferenceResult
-
+from .....inference import inference_pipeline
+    
 class ConvChartROS(Node):
     def __init__(self):
         super().__init__('convchart_ros_node')
@@ -31,4 +32,7 @@ class ConvChartROS(Node):
     def _image_callback(self, msg: Image):
         # Process the image message here
         self.get_logger().info('Received an image message')
-
+        # Call the inference pipeline
+        result = inference_pipeline(msg)
+        # Publish the inference result
+        self._res_pub.publish(result)
