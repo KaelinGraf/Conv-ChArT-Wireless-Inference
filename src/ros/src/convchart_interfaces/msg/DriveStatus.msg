@@ -33,6 +33,12 @@ uint8 state
 # straight out of `ros2 topic echo`.
 string detail
 
+# What the BRIDGE intends, as opposed to what the firmware reports in
+# DriveTelemetry.armed. The two should agree within one telemetry period; if they
+# disagree for longer, an E or an S did not take effect and nothing else will say
+# so. want_armed false with DriveTelemetry.armed true means a disarm was lost.
+bool want_armed
+
 string port
 float32 cmd_age         # seconds since the last cmd_vel, or -1 if none ever arrived
 float32 telemetry_age   # seconds since the last decoded row, or -1 if none ever arrived

@@ -12,6 +12,7 @@ from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 
 
 def generate_launch_description():
@@ -30,9 +31,15 @@ def generate_launch_description():
         output='screen',
         parameters=[{
             'port': LaunchConfiguration('port'),
-            'command_rate_hz': LaunchConfiguration('command_rate_hz'),
-            'cmd_timeout': LaunchConfiguration('cmd_timeout'),
-            'auto_arm': LaunchConfiguration('auto_arm'),
+            # A LaunchConfiguration is a string, and launch type-infers it: pass
+            # command_rate_hz:=10 and it becomes an int, which rclpy rejects
+            # against a double-typed parameter and the node dies on startup. The
+            # value_type pins it so both 10 and 10.0 work.
+            'command_rate_hz': ParameterValue(LaunchConfiguration('command_rate_hz'),
+                                              value_type=float),
+            'cmd_timeout': ParameterValue(LaunchConfiguration('cmd_timeout'),
+                                          value_type=float),
+            'auto_arm': ParameterValue(LaunchConfiguration('auto_arm'), value_type=bool),
             'frame_id': LaunchConfiguration('frame_id'),
         }],
     )

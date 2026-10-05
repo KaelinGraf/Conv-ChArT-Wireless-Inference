@@ -48,9 +48,11 @@ STALLED: cmd_vel is 6.05 s old
 NO_LINK: [Errno 2] could not open port /dev/ttyACM0
 ```
 
-Also on the message: `cmd_age` and `telemetry_age` in seconds (`-1` if that has
-never happened), `dropped_rows` for telemetry that would not parse, and
-`reconnects`. Published at `status_rate_hz` as a heartbeat **and immediately on
+Also on the message: `want_armed`, the bridge's *intent* as opposed to the
+firmware's `DriveTelemetry.armed` — if the two disagree for longer than a
+telemetry period, an `E` or an `S` did not take effect and nothing else will say
+so. Plus `cmd_age` and `telemetry_age` in seconds (`-1` if that has never
+happened), `dropped_rows` for telemetry that would not parse, and `reconnects`. Published at `status_rate_hz` as a heartbeat **and immediately on
 every state change**, so a transition is never delayed by the tick. Durability is
 transient-local, so a filter or supervisor that starts after the bridge learns the
 current state on connection rather than waiting.
@@ -82,9 +84,9 @@ after saturation scaling, which is the input a predictor wants, not the request.
 | `port` | `/dev/ttyACM0` | |
 | `baud` | `115200` | fixed by the firmware's `config.h` |
 | `command_rate_hz` | `20.0` | 8 lost commands of slack before the 400 ms watchdog |
-| `cmd_timeout` | `0.25` | our staleness limit; keep it under 0.4 |
+| `cmd_timeout` | `0.25` | our staleness limit; **clamped below the firmware's 0.4** on startup, because above it our zeros would feed the firmware watchdog a stale velocity forever |
 | `read_rate_hz` | `200.0` | |
-| `auto_arm` | `false` | arms as soon as the Mega streams, and after a reconnect |
+| `auto_arm` | `false` | arms as soon as the Mega streams, **and again after any reboot or reconnect**. Left false, a reboot requires a fresh `~/arm` |
 | `max_linear` | `0.5` | `WHEEL_MAX_MPS` |
 | `max_angular` | `2.08` | `WHEEL_MAX_MPS / CHASSIS_L_PLUS_W` |
 | `publish_imu` | `true` | |
@@ -95,8 +97,32 @@ after saturation scaling, which is the input a predictor wants, not the request.
 
 `max_linear` / `max_angular` come from the firmware's **uncalibrated**
 `WHEEL_MAX_MPS` placeholder. Until it is measured, commanded velocities are
-proportional but not accurate, and modest twists saturate — watch for
-`saturated` in the telemetry.
+proportional but not accurate.
+
+They bound each axis *on its own*, which is **not** the chassis limit. `drive.cpp`
+saturates on the worst wheel, so the real envelope is
+
+```
+|vx| + |vy| + CHASSIS_L_PLUS_W * |wz|  <=  WHEEL_MAX_MPS      (0.24, 0.5)
+```
+
+A command inside both clamps can still come back scaled with `saturated` set —
+`(0.3, 0.3, 1.0)` echoes as `(0.179, 0.179, 0.595)`. Every rate parameter is
+floored on startup too; `read_rate_hz:=0` used to divide by zero.
+
+### Arming and reboots
+
+The firmware boots disarmed and zeroes its stored velocity on `E`, so that arming
+can never make the bot lurch off on a stale command. The bridge preserves that: on
+any link loss **or** firmware reboot it forgets the last `cmd_vel` and holds
+station until the controller speaks again. A Mega 2560's USB CDC is a separate
+ATmega16U2, so the reset button, a brownout or a watchdog reboot restart the
+sketch *without* dropping `/dev/ttyACM0` — the bridge detects that from the boot
+banner rather than assuming a reset always closes the port.
+
+An arm request that fails to reach the wire does not latch, so an operator told
+"failed" cannot have the bridge arm the motors by itself when the cable is next
+plugged in. A failed *disarm* does latch: intending to stop is always safe.
 
 ## Running it
 

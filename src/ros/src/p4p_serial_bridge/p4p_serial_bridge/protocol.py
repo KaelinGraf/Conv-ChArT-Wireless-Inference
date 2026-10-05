@@ -9,12 +9,16 @@ one CSV row per line at 50 Hz; downlink is E / S / V,<vx>,<vy>,<wz>.
 """
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass
+import math
 
 # The header the firmware prints after its boot banner. It carries no '#', so it
 # reads as a data row to a naive parser -- which is why parse_line checks for it.
 TELEMETRY_HEADER = 't_ms,heading_rad,yaw_rate_dps,vx,vy,wz,flags,resets,bad'
+
+# system_setup.cpp prints this first on every boot. It is the only evidence of a
+# firmware restart that did not drop the serial port.
+BOOT_BANNER = '# p4p_arduino starting'
 
 FLAG_ARMED = 0x01
 FLAG_TIMEOUT = 0x02
@@ -124,21 +128,29 @@ class LineReader:
         self.overruns = 0
 
     def feed(self, data: bytes) -> list[str]:
-        """Add received bytes and return whatever complete lines that produced."""
+        """Add received bytes and return whatever complete lines that produced.
+
+        Lines are extracted before the buffer is bounded. Truncating first would
+        throw away whole valid rows whenever a read is larger than max_len, which
+        any stall of the read timer makes reachable -- the stream is ~2 kB/s and
+        read() is called with 4096. Only a trailing fragment with no newline in it
+        can grow without bound, so only that is dropped.
+        """
         self._buf += data
-        if len(self._buf) > self._max_len:
-            # Line noise or a half-open port can deliver bytes with no newline in
-            # them at all. Drop the backlog instead of growing without bound.
-            self.overruns += 1
-            del self._buf[:-(self._max_len // 2)]
         out: list[str] = []
         while True:
             i = self._buf.find(b'\n')
             if i < 0:
-                return out
+                break
             raw = bytes(self._buf[:i])
             del self._buf[:i + 1]
             out.append(raw.decode('ascii', 'replace').rstrip('\r'))
+        if len(self._buf) > self._max_len:
+            # No newline in all of that: line noise, or a port that is open but
+            # babbling. Nothing here is recoverable, so drop it.
+            self.overruns += 1
+            self._buf.clear()
+        return out
 
     def reset(self) -> None:
         """Discard any partial line, after a reconnect or a firmware reset."""
