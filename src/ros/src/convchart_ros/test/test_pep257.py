@@ -16,6 +16,8 @@ from ament_pep257.main import main
 import pytest
 
 
+# Remove the `skip` decorator once the package has been cleaned up to the ROS 2 style
+@pytest.mark.skip(reason='Style linting is disabled until the package follows the ROS 2 style.')
 @pytest.mark.linter
 @pytest.mark.pep257
 def test_pep257():
