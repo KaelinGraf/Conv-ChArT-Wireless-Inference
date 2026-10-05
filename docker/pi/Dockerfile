@@ -46,6 +46,22 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && source /opt/ros/${ROS_DISTRO}/setup.bash \
     && python3 -c "import rclpy, numpy, scipy, serial, yaml, tf_transformations, transforms3d, osqp, qpsolvers; print('pi deps OK numpy', numpy.__version__, 'scipy', scipy.__version__, 'pyserial', serial.__version__, 'osqp', osqp.__version__)"
 
+RUN python3 -m pip install --no-deps ros2-numpy==0.0.5 \
+    && d="$(python3 -m pip show ros2-numpy | sed -n 's/^Location: //p')/ros2_numpy" \
+    && sed -i 's/contig\.tostring()/contig.tobytes()/' "$d/image.py" \
+    && sed -i -e 's/^import transformations as transformations$/import tf_transformations as transformations/' \
+              -e "s/zip(\['w', 'x', 'y', 'z'\]/zip(['x', 'y', 'z', 'w']/g" "$d/geometry.py" \
+    && source /opt/ros/${ROS_DISTRO}/setup.bash \
+    && python3 -c "import numpy as np, ros2_numpy as rnp; \
+        from sensor_msgs.msg import Image; from geometry_msgs.msg import Pose, Transform; \
+        a = np.arange(12, dtype=np.uint8).reshape(3, 4); \
+        assert (rnp.numpify(rnp.msgify(Image, a, encoding='mono8')) == a).all(); \
+        T = np.eye(4); T[:2, :2] = [[0, -1], [1, 0]]; q = [0, 0, 0.5 ** 0.5, 0.5 ** 0.5]; \
+        assert all(np.isclose(abs(np.dot([m.x, m.y, m.z, m.w], q)), 1) \
+                   for m in (rnp.msgify(Pose, T).orientation, rnp.msgify(Transform, T).rotation)); \
+        assert all(np.allclose(rnp.numpify(rnp.msgify(M, T)), T) for M in (Pose, Transform)); \
+        print('ros2_numpy OK: Image mono8, Pose/Transform in ROS (x, y, z, w) order')"
+
 RUN if id ubuntu >/dev/null 2>&1; then userdel -r ubuntu; fi \
     && (getent group "${USER_GID}" >/dev/null || groupadd --gid "${USER_GID}" "${USERNAME}") \
     && useradd --uid "${USER_UID}" --gid "${USER_GID}" -m -s /bin/bash "${USERNAME}" \

@@ -10,7 +10,7 @@ find_package(rosidl_default_generators REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
 rosidl_generate_interfaces(${PROJECT_NAME}
-  "msg/InferenceResult.msg"
+  "msg/RosInferenceResult.msg"
   DEPENDENCIES
     geometry_msgs
     std_msgs

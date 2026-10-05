@@ -7,7 +7,7 @@ talking over WiFi to the machine that runs the inference node in `src/ros`.
 |------|------------|
 | `compose.yaml` (repo root) | the `pi` service: host networking, Arduino passthrough, build args from `.env` |
 | `.env.example` (repo root) | per-machine settings: uid/gid, `ROS_DOMAIN_ID`, RMW, `WITH_CAMERA`, Arduino port |
-| `docker/pi/Dockerfile` | the image (`linux/arm64`): ROS 2 Jazzy ros-base, numpy/scipy, pyserial, tf2 + tf_transformations, osqp/qpsolvers, CycloneDDS + Zenoh RMWs; camera stack opt-in |
+| `docker/pi/Dockerfile` | the image (`linux/arm64`): ROS 2 Jazzy ros-base, numpy/scipy, pyserial, tf2 + tf_transformations, osqp/qpsolvers, ros2_numpy (patched, see the Dockerfile), CycloneDDS + Zenoh RMWs; camera stack opt-in |
 | `docker/pi/smoke_test.py` | runtime check: rclpy + RMW, numpy/scipy, serial ports, tf_transformations |
 | `docker/common/` | entrypoint + shell environment: sources ROS 2, the `src/ros` overlay once it is built, and the CycloneDDS profile |
 | `docker/ros/cyclonedds.xml` | CycloneDDS profile for the WiFi link (use the same file on the laptop) |
