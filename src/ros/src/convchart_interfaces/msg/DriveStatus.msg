@@ -21,6 +21,8 @@ uint8 state
 
 string detail
 
+bool want_armed
+
 string port
 float32 cmd_age
 float32 telemetry_age

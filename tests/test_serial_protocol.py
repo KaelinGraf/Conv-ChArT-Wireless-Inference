@@ -84,6 +84,22 @@ def test_the_firmware_accepts_every_formatted_velocity(mega):
     assert mega.bad == 0
 
 
+def test_clamping_cannot_launder_a_non_finite_command():
+    """Clamping must never turn NaN or inf into a legal full-scale command."""
+    def clamp(v, limit):
+        return max(-limit, min(limit, v))
+
+    for bad in (float("nan"), float("inf"), -float("inf")):
+        laundered = clamp(bad, 0.5)
+        assert math.isfinite(laundered), "precondition of the trap being tested"
+        assert not math.isfinite(bad)
+    m = fake_mega.FakeMega()
+    m.drain()
+    m.feed(b"E\nV,nan,0,0\nV,inf,0,0\n")
+    drive(m, 0, 40)
+    assert m.bad == 2, "the firmware must reject non-finite V fields"
+
+
 def test_non_finite_and_over_long_are_refused():
     """The formatter refuses rather than letting the firmware count an error."""
     for bad in (float("nan"), float("inf"), -float("inf")):
@@ -169,6 +185,29 @@ def test_line_reader_bounds_a_stream_with_no_newlines():
     for _ in range(50):
         assert reader.feed(b"x" * 32) == []
     assert reader.overruns > 0
+
+
+def test_line_reader_keeps_every_row_in_an_oversized_read():
+    """A read larger than max_len must not cost us complete rows."""
+    source = fake_mega.FakeMega()
+    source.feed(protocol.ARM + protocol.format_velocity(0.1, 0.0, 0.0))
+    blob = b""
+    for t in range(0, 500):
+        source.pump(t)
+        blob += source.drain()
+    expected = len([r for r in (protocol.parse_line(ln)
+                                for ln in blob.decode().split("\r\n")) if r])
+    assert expected > 20, "need a decent number of rows to make this meaningful"
+
+    reader = protocol.LineReader(max_len=512)
+    got = []
+    for i in range(0, len(blob), 1100):
+        for line in reader.feed(blob[i:i + 1100]):
+            tel = protocol.parse_line(line)
+            if tel is not None:
+                got.append(tel)
+    assert len(got) == expected, f"lost {expected - len(got)} of {expected} rows"
+    assert reader.overruns == 0, "a stream full of newlines must not count overruns"
 
 
 def test_unparseable_rows_are_rejected_not_guessed():

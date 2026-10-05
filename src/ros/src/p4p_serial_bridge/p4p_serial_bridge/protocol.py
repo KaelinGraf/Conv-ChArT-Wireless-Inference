@@ -9,10 +9,12 @@ one CSV row per line at 50 Hz; downlink is E / S / V,<vx>,<vy>,<wz>.
 """
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass
+import math
 
 TELEMETRY_HEADER = 't_ms,heading_rad,yaw_rate_dps,vx,vy,wz,flags,resets,bad'
+
+BOOT_BANNER = '# p4p_arduino starting'
 
 FLAG_ARMED = 0x01
 FLAG_TIMEOUT = 0x02
@@ -103,17 +105,18 @@ class LineReader:
     def feed(self, data: bytes) -> list[str]:
         """Add received bytes and return whatever complete lines that produced."""
         self._buf += data
-        if len(self._buf) > self._max_len:
-            self.overruns += 1
-            del self._buf[:-(self._max_len // 2)]
         out: list[str] = []
         while True:
             i = self._buf.find(b'\n')
             if i < 0:
-                return out
+                break
             raw = bytes(self._buf[:i])
             del self._buf[:i + 1]
             out.append(raw.decode('ascii', 'replace').rstrip('\r'))
+        if len(self._buf) > self._max_len:
+            self.overruns += 1
+            self._buf.clear()
+        return out
 
     def reset(self) -> None:
         """Discard any partial line, after a reconnect or a firmware reset."""

@@ -38,6 +38,8 @@ import math
 from convchart_interfaces.msg import DriveStatus, DriveTelemetry
 from geometry_msgs.msg import Twist
 import rclpy
+from rclpy.duration import Duration
+from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from rclpy.qos import QoSDurabilityPolicy, QoSHistoryPolicy, QoSProfile, QoSReliabilityPolicy
 from sensor_msgs.msg import Imu
@@ -79,7 +81,19 @@ class SerialBridge(Node):
         self._frame_id = self.get_parameter('frame_id').value
         self._reconnect_period = float(self.get_parameter('reconnect_period').value)
         self._telemetry_timeout = float(self.get_parameter('telemetry_timeout').value)
-        self._want_armed = bool(self.get_parameter('auto_arm').value)
+        self._auto_arm = bool(self.get_parameter('auto_arm').value)
+        self._want_armed = self._auto_arm
+
+        if self._cmd_timeout >= protocol.FIRMWARE_CMD_TIMEOUT_S:
+            safe = protocol.FIRMWARE_CMD_TIMEOUT_S / 2.0
+            self.get_logger().error(
+                f'cmd_timeout={self._cmd_timeout} is not below the firmware watchdog '
+                f'({protocol.FIRMWARE_CMD_TIMEOUT_S} s); our zeros would keep feeding it a '
+                f'stale velocity forever. Clamped to {safe}.')
+            self._cmd_timeout = safe
+        cmd_hz = self._rate('command_rate_hz', 2.0 / protocol.FIRMWARE_CMD_TIMEOUT_S)
+        read_hz = self._rate('read_rate_hz', 1.0)
+        status_hz = self._rate('status_rate_hz', 0.1)
 
         self._ser: serial.Serial | None = None
         self._reader = protocol.LineReader()
@@ -112,24 +126,31 @@ class SerialBridge(Node):
         self._status_pub = self.create_publisher(DriveStatus, 'drive/status', status_qos)
         self._arm_srv = self.create_service(SetBool, '~/arm', self._on_arm)
 
-        self._read_timer = self.create_timer(
-            1.0 / float(self.get_parameter('read_rate_hz').value), self._read_tick)
-        self._write_timer = self.create_timer(
-            1.0 / float(self.get_parameter('command_rate_hz').value), self._write_tick)
-        self._status_timer = self.create_timer(
-            1.0 / float(self.get_parameter('status_rate_hz').value), self._publish_status)
+        self._read_timer = self.create_timer(1.0 / read_hz, self._read_tick)
+        self._write_timer = self.create_timer(1.0 / cmd_hz, self._write_tick)
+        self._status_timer = self.create_timer(1.0 / status_hz, self._publish_status)
 
         self.get_logger().info(
-            f'bridging {self._port} at {self._baud} baud, '
-            f'commands at {self.get_parameter("command_rate_hz").value} Hz, '
-            f'auto_arm={self._want_armed}')
+            f'bridging {self._port} at {self._baud} baud, commands at {cmd_hz} Hz, '
+            f'cmd_timeout={self._cmd_timeout} s, auto_arm={self._auto_arm}')
+
+    def _rate(self, name: str, minimum: float) -> float:
+        """Read a rate parameter, refusing zero (which would divide) and anything slow enough to be
+        unsafe.
+        """
+        value = float(self.get_parameter(name).value)
+        if value < minimum:
+            self.get_logger().error(
+                f'{name}={value} is below the safe minimum {minimum}; clamped')
+            return minimum
+        return value
 
     def _open(self) -> None:
         """Try to open the port, quietly, retrying no faster than reconnect_period."""
         now = self.get_clock().now()
         if now < self._next_open:
             return
-        self._next_open = now + rclpy.duration.Duration(seconds=self._reconnect_period)
+        self._next_open = now + Duration(seconds=self._reconnect_period)
         try:
             self._ser = serial.Serial(self._port, self._baud, timeout=0, write_timeout=0.05)
         except (OSError, serial.SerialException) as e:
@@ -139,9 +160,11 @@ class SerialBridge(Node):
             self._publish_status()
             return
         self._reader.reset()
-        self._booted = False
-        self._last_flags = None
-        self._last_row_time = None
+        try:
+            self._ser.reset_input_buffer()
+        except (OSError, serial.SerialException):
+            pass
+        self._forget_firmware_state('port reopened')
         self._open_error = ''
         if self._opened_once:
             self._reconnects += 1
@@ -149,6 +172,20 @@ class SerialBridge(Node):
         self.get_logger().info(
             f'opened {self._port}; the Mega resets on DTR, waiting for its banner')
         self._publish_status()
+
+    def _forget_firmware_state(self, why: str) -> None:
+        """Reset everything that a firmware reboot invalidates."""
+        self._booted = False
+        self._last_flags = None
+        self._last_row_time = None
+        self._have_cmd = False
+        self._cmd = (0.0, 0.0, 0.0)
+        self._cmd_stale = True
+        if self._want_armed and not self._auto_arm:
+            self._want_armed = False
+            self.get_logger().warning(
+                f'{why}: staying disarmed, call ~/arm again (set auto_arm to re-arm '
+                f'automatically)')
 
     def _drop(self, why: str) -> None:
         """Close the link after an I/O error so the next tick reopens it."""
@@ -159,7 +196,7 @@ class SerialBridge(Node):
         except (OSError, serial.SerialException):
             pass
         self._ser = None
-        self._booted = False
+        self._forget_firmware_state('link lost')
         self._open_error = why
         self._publish_status()
 
@@ -189,6 +226,10 @@ class SerialBridge(Node):
     def _on_line(self, line: str) -> None:
         if line.startswith('#'):
             self.get_logger().info(f'mega: {line}')
+            if line.startswith(protocol.BOOT_BANNER) and self._booted:
+                self.get_logger().warning('the Mega rebooted without dropping the port')
+                self._forget_firmware_state('firmware rebooted')
+                self._publish_status()
             return
         if not line or line == protocol.TELEMETRY_HEADER:
             return
@@ -231,6 +272,7 @@ class SerialBridge(Node):
         if tel.flags != self._last_flags:
             self.get_logger().info(f'mega state: {protocol.describe_flags(tel.flags)}')
             self._last_flags = tel.flags
+            self._publish_status()
 
         if self._imu_pub is not None:
             imu = Imu()
@@ -250,12 +292,13 @@ class SerialBridge(Node):
             self._imu_pub.publish(imu)
 
     def _on_cmd_vel(self, msg: Twist) -> None:
-        vx = _clamp(msg.linear.x, self._max_linear)
-        vy = _clamp(msg.linear.y, self._max_linear)
-        wz = _clamp(msg.angular.z, self._max_angular)
-        if not all(math.isfinite(v) for v in (vx, vy, wz)):
-            self.get_logger().warning('ignoring a cmd_vel carrying NaN or inf')
+        raw = (msg.linear.x, msg.linear.y, msg.angular.z)
+        if not all(math.isfinite(v) for v in raw):
+            self.get_logger().warning(f'ignoring a cmd_vel carrying NaN or inf: {raw}')
             return
+        vx = _clamp(raw[0], self._max_linear)
+        vy = _clamp(raw[1], self._max_linear)
+        wz = _clamp(raw[2], self._max_angular)
         self._cmd = (vx, vy, wz)
         self._cmd_time = self.get_clock().now()
         self._have_cmd = True
@@ -264,8 +307,10 @@ class SerialBridge(Node):
         """Send the newest command, or zeros if it has gone stale. Never skip."""
         if self._ser is None or not self._booted:
             return
-        if not self._have_cmd:
-            self.get_logger().info('no cmd_vel yet, holding station', once=True)
+        if not self._want_armed or not self._have_cmd:
+            if not self._have_cmd:
+                self.get_logger().info('no cmd_vel yet, holding station',
+                                       throttle_duration_sec=10.0)
             vx, vy, wz = 0.0, 0.0, 0.0
         else:
             age = (self.get_clock().now() - self._cmd_time).nanoseconds * 1e-9
@@ -288,11 +333,14 @@ class SerialBridge(Node):
             self._write(protocol.format_velocity(0.0, 0.0, 0.0))
 
     def _on_arm(self, request: SetBool.Request, response: SetBool.Response) -> SetBool.Response:
-        self._want_armed = bool(request.data)
-        sent = self._write(protocol.ARM if self._want_armed else protocol.DISARM)
+        want = bool(request.data)
+        sent = self._write(protocol.ARM if want else protocol.DISARM)
+        if sent or not want:
+            self._want_armed = want
         response.success = sent
-        response.message = (('armed' if self._want_armed else 'disarmed') if sent
-                            else f'{self._port} is not open')
+        response.message = (('armed' if want else 'disarmed') if sent
+                            else f'{self._port} is not open, still '
+                                 f'{"armed" if self._want_armed else "disarmed"}')
         self.get_logger().info(f'arm request: {response.message}')
         self._publish_status()
         return response
@@ -313,6 +361,8 @@ class SerialBridge(Node):
         if silent > self._telemetry_timeout:
             return DriveStatus.NO_TELEMETRY, f'NO_TELEMETRY: silent for {silent:.1f} s'
         if not (self._last_flags or 0) & protocol.FLAG_ARMED:
+            if self._want_armed:
+                return DriveStatus.DISARMED, 'DISARMED: an arm is pending, awaiting the echo'
             return DriveStatus.DISARMED, 'DISARMED: call ~/arm with data: true to enable'
         if not self._have_cmd:
             return DriveStatus.STALLED, 'STALLED: no cmd_vel has arrived yet'
@@ -329,6 +379,7 @@ class SerialBridge(Node):
         msg.header.frame_id = self._frame_id
         msg.state = state
         msg.detail = detail
+        msg.want_armed = self._want_armed
         msg.port = self._port
         msg.cmd_age = self._age(self._cmd_time) if self._have_cmd else -1.0
         msg.telemetry_age = self._age(self._last_row_time)
@@ -340,14 +391,19 @@ class SerialBridge(Node):
             self._state = state
 
     def close(self) -> None:
-        """Disarm the bot and release the port. Safe to call more than once."""
-        if self._ser is not None:
-            self._write(protocol.DISARM)
-            try:
-                self._ser.close()
-            except (OSError, serial.SerialException):
-                pass
-            self._ser = None
+        """Disarm the bot and release the port."""
+        ser, self._ser = self._ser, None
+        if ser is None:
+            return
+        try:
+            ser.write(protocol.DISARM)
+            ser.flush()
+        except (OSError, serial.SerialException) as e:
+            self.get_logger().error(f'could not disarm on the way out: {e}')
+        try:
+            ser.close()
+        except (OSError, serial.SerialException):
+            pass
 
 
 def _clamp(v: float, limit: float) -> float:
@@ -360,7 +416,7 @@ def main(args: list[str] | None = None) -> None:
     node = SerialBridge()
     try:
         rclpy.spin(node)
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, ExternalShutdownException):
         pass
     finally:
         node.close()
