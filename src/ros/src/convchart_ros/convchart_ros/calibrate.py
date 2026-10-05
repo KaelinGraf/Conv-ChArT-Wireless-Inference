@@ -1,14 +1,14 @@
 import json
 import numpy as np
 
-import rclpy
 from rclpy.node import Node
-from rclpy.qos import QoSProfile, QoSDurabilityPolicy, QoSReliabilityPolicy, QoSHistoryPolicy,QoSLivelinessPolicy
 from sensor_msgs.msg import CompressedImage
 from geometry_msgs.msg import PoseWithCovariance, Pose
 from cv_bridge import CvBridge
 import cv2
 import ros2_numpy as rnp
+
+from convchart_qos.qos import IMAGE_SUB_QOS
 
 
 class CalibrateCam(Node):
@@ -21,15 +21,10 @@ class CalibrateCam(Node):
     def __init__(self, cfg_pth: str = '', auto_replace:bool = False):
         super().__init__('calibrate_cam_node')
         self._cfg_pth:str = cfg_pth
-        imgQOSProfile = QoSProfile(
-            history=QoSHistoryPolicy.KEEP_LAST,
-            depth=1,
-            reliability=QoSReliabilityPolicy.RELIABLE,
-            durability=QoSDurabilityPolicy.VOLATILE,
-            liveliness=QoSLivelinessPolicy.AUTOMATIC,
-        )
-
-        self._img_sub = self.create_subscription(CompressedImage, 'image', self._image_callback, imgQOSProfile)
+        # Shared with the inference node and the Pi's camera publisher; see
+        # convchart_qos.
+        # This used to omit deadline/lifespan, which matched only by accident.
+        self._img_sub = self.create_subscription(CompressedImage, 'image', self._image_callback, IMAGE_SUB_QOS)
         self._bridge = CvBridge()
 
     

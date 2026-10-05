@@ -11,6 +11,8 @@
   <depend>sensor_msgs</depend>
   <depend>geometry_msgs</depend>
   <depend>convchart_interfaces</depend>
+  <!-- The image/inference QoS profiles, shared with the Pi's p4p_camera. -->
+  <depend>convchart_qos</depend>
 
   <exec_depend>cv_bridge</exec_depend>
 
