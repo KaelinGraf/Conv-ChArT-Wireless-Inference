@@ -1,0 +1,25 @@
+# One full-resolution (1600x1200) mono frame, PNG-encoded on demand.
+#
+# The camera node retains the newest captured frame and encodes it only when
+# asked: a 1600x1200 PNG costs tens of milliseconds, a quarter of the 10 Hz
+# stream's budget, and nothing wants it most of the time. Calibration and
+# single-shot diagnostics want it; the pose pipeline never does -- it consumes
+# the 640x480 stream on `image`, where its own downscale is the identity.
+
+# Refuse a frame older than this, in seconds. 0 accepts whatever is retained.
+# A camera that died 30 s ago still has a retained frame, and calibrating on it
+# would be silent nonsense, so the client states how fresh it needs the frame.
+float32 max_age
+---
+bool success
+# Why not, when success is false: no frame captured yet, the retained frame is
+# too old, the camera is not open, or an encode is already in flight. Written to
+# be readable straight out of `ros2 service call`.
+string message
+# Capture time of the returned frame, equal to image.header.stamp. Duplicated
+# because it is the field an operator actually reads, and because a client that
+# forwards the image elsewhere should not have to keep the two in sync itself.
+builtin_interfaces/Time capture_stamp
+# format is 'mono8; png compressed mono8', the same string as on `image`.
+# Empty (format '', no data) whenever success is false.
+sensor_msgs/CompressedImage image

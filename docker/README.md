@@ -7,7 +7,7 @@ talking over WiFi to the machine that runs the inference node in `src/ros`.
 |------|------------|
 | `compose.yaml` (repo root) | the `pi` service: host networking, Arduino passthrough, build args from `.env` |
 | `.env.example` (repo root) | per-machine settings: uid/gid, `ROS_DOMAIN_ID`, RMW, `WITH_CAMERA`, Arduino port |
-| `docker/pi/Dockerfile` | the image (`linux/arm64`): ROS 2 Jazzy ros-base, numpy/scipy, pyserial, tf2 + tf_transformations, osqp/qpsolvers, ros2_numpy (patched, see the Dockerfile), CycloneDDS + Zenoh RMWs; camera stack opt-in |
+| `docker/pi/Dockerfile` | the image (`linux/arm64`): ROS 2 Jazzy ros-base, numpy/scipy, pyserial, tf2 + tf_transformations, osqp/qpsolvers, ros2_numpy (patched, see the Dockerfile), CycloneDDS + Zenoh RMWs, OpenCV; camera stack opt-in |
 | `docker/pi/smoke_test.py` | runtime check: rclpy + RMW, numpy/scipy, serial ports, tf_transformations |
 | `docker/common/` | entrypoint + shell environment: sources ROS 2, the `src/ros` overlay once it is built, and the CycloneDDS profile |
 | `docker/ros/cyclonedds.xml` | CycloneDDS profile for the WiFi link (use the same file on the laptop) |
@@ -45,10 +45,45 @@ scp convchart-pi.tar.gz <user>@<pi-ip>:
 gunzip -c convchart-pi.tar.gz | docker load
 ```
 
-Camera: `WITH_CAMERA=1` in `.env` (then rebuild) adds `camera_ros` (libcamera, CSI camera
-modules), `v4l2_camera` (USB cameras) and `image_transport_plugins` (the `compressed` and
-`zstd` transports). The container then also needs the camera device nodes: the simplest
-working set is `privileged: true` plus `/run/udev:/run/udev:ro` (commented in `compose.yaml`).
+Camera: `WITH_CAMERA=1` in `.env` (then rebuild) adds `v4l-utils`, `v4l2_camera` (USB
+cameras), `image_transport_plugins` (the `compressed` and `zstd` transports) and **Arducam's
+libcamera fork plus their picamera2**, which is what `p4p_camera` drives the Pivariety OV2311
+with. `camera_ros` is deliberately *not* installed: Arducam's packages replace the distro
+libcamera, and `camera_ros` is built against the distro ABI.
+
+Three things the image cannot do for you:
+
+1. **The kernel driver and overlay are the host's job.** `/boot/firmware/config.txt` needs
+   `camera_auto_detect=0` and `dtoverlay=arducam-pivariety`, then a reboot. Never run the
+   Arducam script's `-p kernel_driver` inside the container: it builds against the host kernel
+   and writes to `/boot/firmware/config.txt`, i.e. the wrong machine.
+2. **Device passthrough is a separate compose service.** The plain `pi` service passes through
+   no camera nodes, because a listed-but-absent device stops the container. Use the profile:
+   `docker compose --profile camera up -d pi-camera`. It starts `privileged` for first
+   bring-up; narrow it to a `device_cgroup_rules` allow-list once `ls -l /dev/video*
+   /dev/media* /dev/v4l-subdev* /dev/dma_heap/*` on the real Pi gives you the major numbers.
+   libcamera needs more than `/dev/video0`: `/dev/media*` is the media controller it
+   *configures the pipeline through* (missing it is the classic "no cameras available" inside
+   Docker), and `/dev/dma_heap` is where a Pi 5 allocates frame buffers.
+3. **Verify the binding imports before anything else.** Arducam's `.debs` target Raspberry Pi
+   OS (Debian bookworm, python 3.11); this base is Ubuntu noble with python 3.12, and
+   `python3-libcamera` is a compiled binding. The build warns rather than failing if it will
+   not install, so check it explicitly, inside the container:
+
+   ```bash
+   python3 -c "from picamera2 import Picamera2; import pprint; pprint.pp(Picamera2().sensor_modes)"
+   ```
+
+   This one command proves the userspace imports, that udev enumeration crosses the container
+   boundary, and that dma_heap works. Its output is also the fixture for
+   `p4p_camera.frames.pick_mode`'s tests. If it fails, the fallbacks in increasing cost are:
+   build the fork from source against python 3.12; use `p4p_camera`'s `v4l2` backend with a
+   `media-ctl` setup script, which needs no userspace libcamera at all; or run the camera node
+   on the host, where Arducam's stack installs natively.
+
+Arducam also warn that a system `apt upgrade` silently replaces their libcamera with
+Raspberry Pi's, which breaks a working camera. The image `apt-mark hold`s it; don't run
+`apt upgrade` in a live container, rebuild instead.
 
 ## 3. Run
 
@@ -58,12 +93,29 @@ docker compose exec pi bash -c "python3 docker/pi/smoke_test.py"
 docker compose exec pi bash             # ROS 2 sourced, this repo mounted at /workspace
 ```
 
-Inside the container, build the message package once (the inference node itself runs on the laptop):
+Inside the container, build the workspace once. The Pi needs four packages and **not**
+`convchart_ros`: that one is the laptop's inference node, and its `cv_bridge` dependency
+resolves to `libopencv-dev` plus some fifty further apt packages a camera has no use for.
+The only thing the two sides share is `convchart_qos`, which imports `rclpy` and nothing else.
 
 ```bash
 cd /workspace/src/ros
+# Interfaces FIRST and alone: adding a .srv regenerates the interface library, and a stale
+# install/ surfaces later as an unhelpful "unknown type" at runtime.
 colcon build --symlink-install --packages-select convchart_interfaces
+colcon build --symlink-install --packages-select convchart_qos p4p_camera p4p_serial_bridge
 ```
+
+Both machines must rebuild `convchart_interfaces` after a `.msg`/`.srv` change, and they must
+agree. To run the camera tests (they need no camera -- the `mock` backend stands in):
+
+```bash
+colcon test --packages-select p4p_camera --event-handlers console_direct+
+colcon test-result --verbose
+```
+
+Under QEMU on an x86 host, export `RMW_IMPLEMENTATION=rmw_fastrtps_cpp` first: CycloneDDS
+cannot create a node there (see the note further down), and the graph tests are what it bites.
 
 New shells source `src/ros/install/setup.bash` automatically.
 
@@ -101,8 +153,24 @@ Zenoh is installed as the alternative for lossy links: set `RMW_IMPLEMENTATION=r
 on both ends, run `ros2 run rmw_zenoh_cpp rmw_zenohd` on the laptop, and on the Pi point at
 it with `ZENOH_CONFIG_OVERRIDE='connect/endpoints=["tcp/<laptop-ip>:7447"]'`.
 
-Frames: the Pi publishes `sensor_msgs/Image` `mono8`. A native 1600x1200 frame is 1.92 MB, so
-15 Hz raw is ~230 Mbit/s, more than WiFi sustains reliably. For lossless compression use the
-`compressed` transport with `format: png` (decode on the laptop with `cv2.imdecode`) or the
-`zstd` transport; both need `WITH_CAMERA=1` on the Pi. Avoid JPEG: the refiner reads
-sub-pixel offsets from 24x24 native crops, so compression artefacts would bias it.
+Frames: `p4p_camera` publishes `sensor_msgs/CompressedImage` on `image`, as a **640x480
+mono8 PNG at 10 Hz** -- roughly 200 kB a frame, about 16 Mbit/s. That is the whole reason the
+stream is downscaled on the Pi: a native 1600x1200 frame is 1.92 MB, so 15 Hz raw would be
+~230 Mbit/s, far more than WiFi sustains reliably. 640x480 is also *exactly* the detector's
+input size, so the inference pipeline's own resize becomes the identity.
+
+The full 1600x1200 frame is still available, but **on demand only**, through the
+`image_full_res` service (`convchart_interfaces/GetFullResImage`); the node retains the newest
+frame and encodes it when asked. Use `tools/grab_full_res.py -o frame.png` -- `ros2 service
+call` prints the response as a ~2 MB decimal array. That response is an order of magnitude
+larger than anything else on this link, so test it *across* WiFi, not just in-container; if it
+proves unreliable, the fallback is to have the service write the file into the bind-mounted
+workspace and return the path.
+
+**Avoid JPEG at any quality**: the refiner reads sub-pixel offsets from 24x24 native crops, so
+compression artefacts would bias the pose rather than merely soften the picture. PNG's
+compression level trades CPU for bytes only, never quality.
+
+Because the stream is downscaled, **intrinsics must be calibrated at 640x480**, not at sensor
+resolution. See `src/ros/src/p4p_camera/README.md`; converting an existing calibration is
+`frames.scale_intrinsics`, and it is *not* simply `K / 2.5`.
