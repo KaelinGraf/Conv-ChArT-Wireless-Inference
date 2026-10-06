@@ -63,13 +63,13 @@ needs three things set up on the host:
 2. **The CSI pipeline.** On a Pi 5 the sensor sits behind `rp1-cfe`'s media-controller graph,
    which libcamera would normally configure. `docker/camera-pipeline-pi.sh` does it with
    `media-ctl` instead: 8-bit mono 1600x1300 to `/dev/video0`, with the sensor paced to
-   10 fps.
+   15 fps.
    - **At boot:** `host-setup-pi.sh` installs it as `p4p-camera-pipeline.service`, which runs
      at every boot.
    - **Re-run it** with `sudo /usr/local/sbin/p4p-camera-pipeline` if anything else
      reconfigures the graph, for example `rpicam-hello` on the host.
    - **Check it** with `v4l2-ctl -d /dev/video0 --stream-mmap --stream-count=30
-     --stream-to=/dev/null`, which should report ~10 fps.
+     --stream-to=/dev/null`, which should report ~15 fps.
 3. **Device passthrough, through a separate compose service.** The plain `pi` service passes
    through no camera nodes, because a listed-but-absent device stops the container.
    - **Use the profile:** `docker compose --profile camera up -d pi-camera`.
@@ -163,8 +163,8 @@ on both ends, run `ros2 run rmw_zenoh_cpp rmw_zenohd` on the laptop, and on the 
 it with `ZENOH_CONFIG_OVERRIDE='connect/endpoints=["tcp/<laptop-ip>:7447"]'`.
 
 Frames: `p4p_camera` publishes `sensor_msgs/CompressedImage` on `image`, as a **640x480
-mono8 PNG at 10 Hz** -- roughly 200 kB a frame, about 16 Mbit/s. That is the whole reason the
-stream is downscaled on the Pi: a native 1600x1200 frame is 1.92 MB, so 15 Hz raw would be
+mono8 PNG at 15 Hz** -- about 110 kB a frame as measured, so ~13 Mbit/s. That is the whole
+reason the stream is downscaled on the Pi: a native 1600x1200 frame is 1.92 MB, so 15 Hz raw would be
 ~230 Mbit/s, far more than WiFi sustains reliably. 640x480 is also *exactly* the detector's
 input size, so the inference pipeline's own resize becomes the identity.
 

@@ -5,7 +5,7 @@ libcamera would normally configure. This module does not touch the graph:
 docker/camera-pipeline-pi.sh sets it up on the host, at every boot once
 host-setup-pi.sh has installed it as a service. That puts the sensor in its
 native 8-bit mono mode (Y8_1X8, 1600x1300), links it through csi2 to
-rp1-cfe-csi2_ch0 (/dev/video0) and paces it to 10 fps through vertical
+rp1-cfe-csi2_ch0 (/dev/video0) and paces it to 15 fps through vertical
 blanking. Without that setup, /dev/video0 opens but never delivers a frame.
 
 Why not picamera2 on the Pi: it needs Arducam's libcamera for this sensor, which
@@ -35,7 +35,7 @@ class V4L2Backend(CameraBackend):
         self._log = logger
         self._device = str(params.get('device', '/dev/video0'))
         self._crop_top = int(params.get('crop_top', frames.CROP_TOP))
-        self._frame_rate = float(params.get('frame_rate', 10.0))
+        self._frame_rate = float(params.get('frame_rate', 15.0))
         self._cap = None
 
     def start(self) -> None:

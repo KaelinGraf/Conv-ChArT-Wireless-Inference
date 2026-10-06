@@ -45,7 +45,7 @@ class MockBackend(CameraBackend):
         # present a sensor running faster than the node asked for.
         rate = float(params.get('mock_rate', 0.0) or 0.0)
         if rate <= 0.0:
-            rate = float(params.get('frame_rate', 10.0))
+            rate = float(params.get('frame_rate', 15.0))
         self._period = 1.0 / max(rate, 0.1)
         self._started = False
         self._count = 0

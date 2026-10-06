@@ -22,10 +22,10 @@
 #   sudo /usr/local/sbin/p4p-camera-pipeline [FPS]    # as installed
 #   sudo docker/camera-pipeline-pi.sh [FPS]           # from the repo
 #
-# FPS defaults to 10, the camera node's frame_rate; keep the two equal.
+# FPS defaults to 15, the camera node's frame_rate; keep the two equal.
 set -euo pipefail
 
-FPS="${1:-10}"
+FPS="${1:-15}"
 WIDTH=1600
 HEIGHT=1300          # p4p_camera.frames.ACTIVE; the node crops it to 1600x1200
 CODE=Y8_1X8

@@ -5,7 +5,7 @@ belong in the nodes on either side of it.
 
 One topic, one service, and deliberately not two topics:
 
-    image             sensor_msgs/CompressedImage   out  640x480 mono8 PNG, 10 Hz
+    image             sensor_msgs/CompressedImage   out  640x480 mono8 PNG, 15 Hz
     camera_info       sensor_msgs/CameraInfo        out  intrinsics FOR THAT 640x480
     image_full_res    convchart_interfaces/..       srv  the newest 1600x1200 frame
 
@@ -35,7 +35,7 @@ Three invariants worth not breaking:
   * Frames handed out by a backend are copies, not views into its DMA buffer, so
     the service can spend 40 ms encoding one while capture moves on.
   * close() joins the capture thread BEFORE destroy_node(). publish() on a
-    destroyed publisher is a segfault, and at 10 Hz the thread is mid-publish a
+    destroyed publisher is a segfault, and at 15 Hz the thread is mid-publish a
     noticeable fraction of the time.
 """
 from __future__ import annotations
@@ -92,10 +92,11 @@ class CameraNode(Node):
         # The v4l2 backend only: the rp1-cfe-csi2_ch0 node, which
         # camera-pipeline-pi.sh reports if it is not /dev/video0.
         self.declare_parameter('device', '/dev/video0')
-        # 640x480 mono PNG is roughly 200 kB, so 10 Hz is about 16 Mbit/s. Floored
+        # 640x480 mono PNG measured ~110 kB on the Pi, so 15 Hz is ~13 Mbit/s, and
+        # the laptop's decode + inference (~45 ms) fits the 67 ms period. Floored
         # at 5 Hz: below that no offered deadline satisfies the inference node's
         # requested 0.2 s while still being a period we can honour.
-        self.declare_parameter('frame_rate', 10.0)
+        self.declare_parameter('frame_rate', 15.0)
         # What test_node_pose_output.py and the pose consumer already expect.
         self.declare_parameter('frame_id', 'pi_camera')
         # OpenCV's default. Higher levels trade CPU for a few percent of bytes and
@@ -125,7 +126,7 @@ class CameraNode(Node):
         # the serial bridge's, deliberately.
         self.declare_parameter('reconnect_period', 1.0)
         # Enough libcamera buffers to ride out a scheduling hiccup without adding
-        # latency: at 10 Hz we are never more than one frame behind by design.
+        # latency: at 15 Hz we are never more than one frame behind by design.
         self.declare_parameter('buffer_count', 4)
         # CameraInfo makes the 640x480 intrinsics contract visible in the graph
         # rather than only in cfg/cfg.yaml on the laptop.

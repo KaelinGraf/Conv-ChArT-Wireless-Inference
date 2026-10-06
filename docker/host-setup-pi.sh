@@ -48,8 +48,8 @@ Description=p4p: configure the Pi 5 CSI pipeline for p4p_camera's v4l2 backend
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-# 10 fps = the camera node's frame_rate; keep the two equal.
-ExecStart=/usr/local/sbin/p4p-camera-pipeline 10
+# 15 fps = the camera node's frame_rate; keep the two equal.
+ExecStart=/usr/local/sbin/p4p-camera-pipeline 15
 
 [Install]
 WantedBy=multi-user.target
