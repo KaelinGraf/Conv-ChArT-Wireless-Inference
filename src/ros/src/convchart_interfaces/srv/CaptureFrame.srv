@@ -1,0 +1,5 @@
+# Request one full-resolution frame, captured after the request arrives.
+---
+bool success
+string message
+sensor_msgs/CompressedImage image   # PNG, mono8, full resolution

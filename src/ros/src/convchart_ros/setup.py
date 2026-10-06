@@ -24,6 +24,8 @@ setup(
     },
     entry_points={
         'console_scripts': [
+            'calibrate = convchart_ros.calibrate:main',
+            'fake_camera = convchart_ros.calib_utils.fake_camera:main',
         ],
     },
 )

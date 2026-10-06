@@ -129,3 +129,15 @@ def _pack_pose(rvec: np.ndarray | None, tvec: np.ndarray | None,
 
 
 
+def main(args=None):
+    rclpy.init(args=args)
+    convchart_node = ConvChartROS(cfg_pth='/path/to/config.yaml')
+    executor = rclpy.executors.MultiThreadedExecutor()
+    executor.add_node(convchart_node)
+    try:
+        executor.spin()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        convchart_node.destroy_node()
+        rclpy.shutdown()
