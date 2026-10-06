@@ -1,9 +1,7 @@
 import yaml
 import numpy as np
 
-import rclpy
 from rclpy.node import Node
-from rclpy.qos import QoSProfile, QoSDurabilityPolicy, QoSReliabilityPolicy, QoSHistoryPolicy,QoSLivelinessPolicy
 from sensor_msgs.msg import CompressedImage
 from geometry_msgs.msg import PoseWithCovariance, Pose
 from cv_bridge import CvBridge
@@ -11,6 +9,7 @@ import cv2
 import ros2_numpy as rnp
 
 from convchart_interfaces.msg import RosInferenceResult
+from convchart_qos.qos import IMAGE_SUB_QOS, INFERENCE_RESULT_QOS
 from .inference import inference_pipeline, InferenceResult
 
     
@@ -18,25 +17,11 @@ class ConvChartROS(Node):
     def __init__(self, cfg_pth: str = ''):
         super().__init__('convchart_ros_node')
         self._cfg_pth:str = cfg_pth
-        imgQOSProfile = QoSProfile(
-            history=QoSHistoryPolicy.KEEP_LAST,
-            depth=1,
-            reliability=QoSReliabilityPolicy.RELIABLE,
-            durability=QoSDurabilityPolicy.VOLATILE,
-            deadline=rclpy.duration.Duration(seconds=0.2),
-            lifespan=rclpy.duration.Duration(seconds=0.15),
-            liveliness=QoSLivelinessPolicy.AUTOMATIC,
-            liveliness_lease_duration=rclpy.duration.Duration(seconds=1.0)
-        )
-        inferenceQOSProfile = QoSProfile(
-            history=QoSHistoryPolicy.KEEP_LAST,
-            depth = 10,
-            reliability=QoSReliabilityPolicy.RELIABLE,
-            durability=QoSDurabilityPolicy.TRANSIENT_LOCAL
-        )
-
-        self._img_sub = self.create_subscription(CompressedImage, 'image', self._image_callback, imgQOSProfile)
-        self._res_pub = self.create_publisher(RosInferenceResult, 'inference_result', inferenceQOSProfile)
+        # Both profiles live in convchart_qos: the camera node on the Pi publishes
+        # against the same definitions, and a disagreement between the two ends is
+        # silent -- the topic simply never connects.
+        self._img_sub = self.create_subscription(CompressedImage, 'image', self._image_callback, IMAGE_SUB_QOS)
+        self._res_pub = self.create_publisher(RosInferenceResult, 'inference_result', INFERENCE_RESULT_QOS)
 
         self._guard_cfg(cfg_pth)
         self._inference_pipeline:inference_pipeline = inference_pipeline(config=self._cfg_pth)

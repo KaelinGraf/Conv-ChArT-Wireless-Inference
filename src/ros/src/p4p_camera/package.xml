@@ -1,0 +1,35 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>p4p_camera</name>
+  <version>0.0.1</version>
+  <description>Arducam OV2311 driver for the Pi: 640x480 mono PNG stream plus a full-resolution service</description>
+  <maintainer email="dev@todo.todo">dev</maintainer>
+  <license>Apache-2.0</license>
+
+  <depend>rclpy</depend>
+  <depend>sensor_msgs</depend>
+  <depend>builtin_interfaces</depend>
+  <depend>convchart_interfaces</depend>
+  <!-- The image QoS profiles both ends have to agree on. Its own package, and
+       NOT convchart_ros, precisely so the Pi stays clear of that package's
+       cv_bridge exec_depend -> libopencv-dev -> ~50 more apt packages. -->
+  <depend>convchart_qos</depend>
+  <!-- cv2 (INTER_AREA downscale, PNG encode) and numpy. rosdep keys resolve to
+       the apt packages, which matters on Noble: pip into the system python is
+       blocked by PEP 668, and apt's build is ABI-matched to apt's numpy.
+       Deliberately NOT cv_bridge: we build the CompressedImage by hand, which is
+       one dependency fewer on the Pi and makes the format string explicit. -->
+  <depend>python3-opencv</depend>
+  <depend>python3-numpy</depend>
+  <depend>python3-yaml</depend>
+
+  <test_depend>ament_copyright</test_depend>
+  <test_depend>ament_flake8</test_depend>
+  <test_depend>ament_pep257</test_depend>
+  <test_depend>python3-pytest</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

@@ -24,6 +24,7 @@ import time
 import traceback
 
 from convchart_interfaces.srv import CaptureFrame
+from convchart_qos.qos import IMAGE_SUB_QOS
 import cv2
 import numpy as np
 from rcl_interfaces.msg import ParameterDescriptor
@@ -32,14 +33,13 @@ from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
 from rclpy.exceptions import ParameterException
 from rclpy.executors import ExternalShutdownException, MultiThreadedExecutor
 from rclpy.node import Node
-from rclpy.qos import QoSDurabilityPolicy, QoSHistoryPolicy, QoSLivelinessPolicy
-from rclpy.qos import QoSProfile, QoSReliabilityPolicy
 from rclpy.task import Future
 from sensor_msgs.msg import CompressedImage
 import yaml
 
-from .calib_utils.calib_session import (build_log, CalibrationSession, Detection, scale_intrinsics,
-                            settings_from_cfg, Solution, write_camera_to_cfg, write_log)
+from .calib_utils.calib_session import (
+    build_log, CalibrationSession, Detection, scale_intrinsics, settings_from_cfg, Solution,
+    write_camera_to_cfg, write_log)
 from .calib_utils.calib_view import compose_live, compose_review, HudState
 
 WINDOW_NAME = "calibrate"
@@ -186,16 +186,9 @@ class CalibrateCam(Node):
         self._video_cb_group = MutuallyExclusiveCallbackGroup()
         self._calib_cb_group = MutuallyExclusiveCallbackGroup()
 
-        imgQOSProfile = QoSProfile(
-            history=QoSHistoryPolicy.KEEP_LAST,
-            depth=1,
-            reliability=QoSReliabilityPolicy.RELIABLE,
-            durability=QoSDurabilityPolicy.VOLATILE,
-            liveliness=QoSLivelinessPolicy.AUTOMATIC,
-        )
-
+        # Shared with the inference node and the Pi's camera publisher; see convchart_qos.
         self._vid_sub = self.create_subscription(CompressedImage, "image", self._video_stream,
-                                                 imgQOSProfile,
+                                                 IMAGE_SUB_QOS,
                                                  callback_group=self._video_cb_group)
         self._capture_client = self.create_client(CaptureFrame, "capture",
                                                   callback_group=self._calib_cb_group)

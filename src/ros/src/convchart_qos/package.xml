@@ -1,0 +1,25 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>convchart_qos</name>
+  <version>0.0.1</version>
+  <description>Shared image and inference QoS profiles: the one place both ends of the wireless link agree</description>
+  <maintainer email="dev@todo.todo">dev</maintainer>
+  <license>Apache-2.0</license>
+
+  <!-- rclpy and NOTHING else, deliberately. This package exists so that the Pi
+       can import the image QoS without depending on convchart_ros, whose
+       cv_bridge exec_depend resolves to libopencv-dev and ~50 further apt
+       packages that a camera node has no use for. Keep this manifest at one
+       dependency: the moment it grows a second, that reason is gone. -->
+  <depend>rclpy</depend>
+
+  <test_depend>ament_copyright</test_depend>
+  <test_depend>ament_flake8</test_depend>
+  <test_depend>ament_pep257</test_depend>
+  <test_depend>python3-pytest</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

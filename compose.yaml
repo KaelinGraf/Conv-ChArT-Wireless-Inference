@@ -15,6 +15,7 @@ services:
       dockerfile: pi/Dockerfile
       args:
         WITH_CAMERA: ${WITH_CAMERA:-0}
+        ARDUCAM_PICAMERA2_REF: ${ARDUCAM_PICAMERA2_REF:-main}
         USER_UID: ${UID:-1000}
         USER_GID: ${GID:-1000}
     image: convchart-wireless/pi:jazzy
@@ -39,9 +40,51 @@ services:
       - SYS_NICE              # SCHED_FIFO / nice for the fixed-rate filter loop
     ulimits:
       rtprio: 99
-    # WITH_CAMERA=1 also needs the camera device nodes; the simplest working set is
-    #   privileged: true
-    #   volumes: [ /run/udev:/run/udev:ro ]   (libcamera enumerates through udev)
+
+  # ---------------------------------------------------------------------------
+  # The same container with the camera attached. Run it INSTEAD of `pi`:
+  #   docker compose --profile camera up -d pi-camera
+  # It is a separate service because compose cannot make `devices` conditional,
+  # and a listed-but-absent device stops the container -- the Arduino footgun
+  # documented in docker/README.md. This keeps the default `pi` service
+  # unprivileged and startable on a board with no camera.
+  #
+  # Needs WITH_CAMERA=1 at BUILD time and, on the host, config.txt carrying
+  #   camera_auto_detect=0
+  #   dtoverlay=arducam-pivariety
+  # ---------------------------------------------------------------------------
+  pi-camera:
+    extends:
+      service: pi
+    profiles: ["camera"]
+    container_name: convchart-pi-camera
+    # TIER 2, for first bring-up. Get the camera working this way, THEN narrow it:
+    # run `ls -l /dev/video* /dev/media* /dev/v4l-subdev* /dev/dma_heap/*` on the
+    # actual Pi, read off the real major numbers, and replace `privileged` with the
+    # device_cgroup_rules block below. The majors are dynamic, so they cannot be
+    # guessed off-board -- debugging device permissions and libcamera at the same
+    # time is the thing to avoid.
+    privileged: true
+    # TIER 1, once those numbers are known. Replace `privileged: true` with:
+    #   device_cgroup_rules:
+    #     - 'c 81:* rmw'    # video4linux: /dev/video*, /dev/v4l-subdev*
+    #     - 'c <media>:* rmw'   # media controller: /dev/media*
+    #     - 'c 10:* rmw'    # misc, including /dev/dma_heap/*
+    #   group_add: [ video ]
+    volumes:
+      - .:/workspace
+      - pi-home:/home/dev
+      # libcamera enumerates cameras through udev. WITHOUT THIS, Picamera2()
+      # reports no cameras at all and the error says nothing about udev.
+      - /run/udev:/run/udev:ro
+      # /dev/video*      rp1-cfe capture and pisp ISP nodes
+      # /dev/media*      the media controller libcamera CONFIGURES the pipeline
+      #                  through -- missing it is the classic "no cameras
+      #                  available" inside Docker
+      # /dev/v4l-subdev* the sensor subdevices it sets mode and exposure on
+      # /dev/dma_heap    where a Pi 5 allocates frame buffers; missing it fails
+      #                  at configure(), not at open
+      - /dev/dma_heap:/dev/dma_heap
 
 volumes:
   pi-home:
