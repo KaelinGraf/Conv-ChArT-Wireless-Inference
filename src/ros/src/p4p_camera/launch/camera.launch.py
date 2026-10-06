@@ -3,6 +3,8 @@
     ros2 launch p4p_camera camera.launch.py
     ros2 launch p4p_camera camera.launch.py camera_backend:=mock
 
+The first form uses the v4l2 backend, which needs the host's CSI pipeline
+configured (docker/camera-pipeline-pi.sh; host-setup-pi.sh runs it at boot).
 The mock backend needs no hardware, so the second form is the one to use for
 bring-up on a bench, and with mock_image set it will replay a recorded
 1600x1200 frame to the real inference node over WiFi.
@@ -16,8 +18,8 @@ from launch_ros.parameter_descriptions import ParameterValue
 
 def generate_launch_description():
     args = [
-        DeclareLaunchArgument('camera_backend', default_value='picamera2',
-                              description='picamera2, v4l2 or mock'),
+        DeclareLaunchArgument('camera_backend', default_value='v4l2',
+                              description='v4l2, picamera2 or mock'),
         DeclareLaunchArgument('frame_rate', default_value='10.0',
                               description='stream rate in Hz; floored at 5.0'),
         DeclareLaunchArgument('frame_id', default_value='pi_camera'),

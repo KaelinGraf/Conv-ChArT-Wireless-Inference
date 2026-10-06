@@ -5,9 +5,10 @@
 #   + osqp/qpsolvers (constrained MPC QP) + pyserial (Arduino Mega 2560 over
 #   /dev/ttyACM0, IMU packets + motor commands) + tf2 / tf_transformations + both
 #   WiFi-friendly RMWs (CycloneDDS, Zenoh). No ML dependencies of any kind.
-#   + OpenCV (p4p_camera's downscale and PNG encode).
-#   Camera stack is opt-in: --build-arg WITH_CAMERA=1 adds v4l-utils and
-#   Arducam's libcamera fork + picamera2 for the Pivariety OV2311.
+#   + OpenCV (p4p_camera's v4l2 capture, downscale and PNG encode -- all the
+#   camera needs; its CSI pipeline is set up on the host, see docker/README.md).
+#   --build-arg WITH_CAMERA=1 adds v4l-utils, v4l2_camera and the image_transport
+#   plugins; its Arducam libcamera + picamera2 step cannot install on this base.
 #
 # Build context is ./docker (see compose.yaml). Same layout / entrypoint / user
 # as the GPU image so a node developed on the laptop runs unchanged here.
@@ -46,11 +47,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     # distro libcamera, and camera-ros is built against the distro libcamera's ABI,
     # so keeping it invites a confusing load failure in a package p4p_camera does
     # not use. v4l-utils is in the bring-up checklist, image-transport-plugins is
-    # handy for `ros2 run image_transport republish` when debugging, and the
-    # python3-* trio are picamera2's dependencies.
+    # handy for `ros2 run image_transport republish` when debugging, and
+    # python3-prctl / libatlas-base-dev are picamera2's dependencies. (So is
+    # python3-kms++, for its DRM preview only, but noble does not package it and
+    # listing it failed the whole build.)
     && if [ "${WITH_CAMERA}" = "1" ]; then apt-get install -y --no-install-recommends \
         v4l-utils \
-        python3-kms++ python3-prctl libatlas-base-dev \
+        python3-prctl libatlas-base-dev \
         ros-${ROS_DISTRO}-v4l2-camera \
         ros-${ROS_DISTRO}-image-transport-plugins ; fi \
     && rm -rf /var/lib/apt/lists/* \
@@ -87,16 +90,14 @@ RUN python3 -m pip install --no-deps ros2-numpy==0.0.5 \
 # Arducam's libcamera fork + their picamera2, for the Pivariety OV2311 (WITH_CAMERA=1).
 # The kernel driver and the dtoverlay are the HOST's job -- see docker/README.md.
 #
-# RISK, and it is the main one in this image: these .debs target Raspberry Pi OS
-# (Debian bookworm, python 3.11), whereas this base is Ubuntu noble with python
-# 3.12, and python3-libcamera is a compiled binding. It may not import. Check it
-# FIRST, before touching the node:
-#     python3 -c "from picamera2 import Picamera2; print(Picamera2().sensor_modes)"
-# If it fails, the fallbacks in order of cost are (a) build the fork from source
-# against python 3.12, (b) use p4p_camera's v4l2 backend with a media-ctl setup
-# script, which needs no userspace libcamera at all, or (c) run the camera node on
-# the host. The build is therefore NOT allowed to fail on this: it warns and
-# carries on, so a WITH_CAMERA=1 image is still usable with the other backends.
+# CONFIRMED ON HARDWARE (2026-10): this step cannot succeed on this base. Arducam
+# publish libcamera packages for Raspberry Pi OS (Debian bookworm, trixie) only;
+# on Ubuntu noble their installer stops with "Unsupported package", so picamera2
+# never imports. That is why p4p_camera defaults to the v4l2 backend, with the
+# CSI pipeline configured on the host by docker/camera-pipeline-pi.sh. The way
+# back to picamera2 would be building Arducam's libcamera fork from source here.
+# The build is NOT allowed to fail on this: it warns and carries on, so a
+# WITH_CAMERA=1 image is still usable with the other backends.
 ARG ARDUCAM_SCRIPT_URL=https://github.com/ArduCAM/Arducam-Pivariety-V4L2-Driver/releases/download/install_script/install_pivariety_pkgs.sh
 ARG ARDUCAM_PICAMERA2_REF=main
 RUN if [ "${WITH_CAMERA}" != "1" ]; then exit 0; fi; \

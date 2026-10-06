@@ -49,9 +49,12 @@ services:
   # documented in docker/README.md. This keeps the default `pi` service
   # unprivileged and startable on a board with no camera.
   #
-  # Needs WITH_CAMERA=1 at BUILD time and, on the host, config.txt carrying
+  # Needs, on the host, config.txt carrying
   #   camera_auto_detect=0
   #   dtoverlay=arducam-pivariety
+  # and the CSI pipeline configured, which p4p-camera-pipeline.service (installed
+  # by docker/host-setup-pi.sh) does at boot. Nothing extra in the image: the
+  # default v4l2 backend needs no WITH_CAMERA.
   # ---------------------------------------------------------------------------
   pi-camera:
     extends:

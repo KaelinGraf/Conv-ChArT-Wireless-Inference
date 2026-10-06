@@ -81,14 +81,16 @@ class CameraNode(Node):
         super().__init__('camera_node', **kwargs)
 
         # -- parameters ----------------------------------------------------- #
-        # picamera2 reads the RAW stream and bypasses the ISP: a mono sensor has
-        # no CFA, so debayering buys nothing, and it sidesteps the missing
-        # arducam-pivariety_mono.json tuning file for the pisp IPA on the Pi 5.
-        self.declare_parameter('camera_backend', 'picamera2')
+        # v4l2 reads the sensor's native 8-bit mono mode straight off rp1-cfe,
+        # once docker/camera-pipeline-pi.sh has configured the CSI graph on the
+        # host (at boot, via host-setup-pi.sh). picamera2 would read the RAW
+        # stream with the ISP bypassed, but it needs Arducam's libcamera, which
+        # ships for Raspberry Pi OS only -- there is none for this image's Ubuntu.
+        self.declare_parameter('camera_backend', 'v4l2')
         # A Pi 5 has two CSI ports.
         self.declare_parameter('camera_index', 0)
-        # The v4l2 backend only. See backends/v4l2.py for why this is a fallback
-        # rather than an equal alternative on a Pi 5.
+        # The v4l2 backend only: the rp1-cfe-csi2_ch0 node, which
+        # camera-pipeline-pi.sh reports if it is not /dev/video0.
         self.declare_parameter('device', '/dev/video0')
         # 640x480 mono PNG is roughly 200 kB, so 10 Hz is about 16 Mbit/s. Floored
         # at 5 Hz: below that no offered deadline satisfies the inference node's
@@ -107,10 +109,12 @@ class CameraNode(Node):
         # An 8-bit sensor mode halves CSI bandwidth, and RAW10's leading byte is
         # the same pixel, so neither path loses anything we keep.
         self.declare_parameter('prefer_8bit', True)
-        # 0 leaves libcamera's AE alone. Pin both once the arena lighting is
-        # known: a global shutter with a fixed short exposure is what makes
-        # detections repeatable on a moving bot, and AE hunting moves the
-        # detector's heatmap peaks frame to frame.
+        # picamera2 only. 0 leaves libcamera's AE alone. Pin both once the arena
+        # lighting is known: a global shutter with a fixed short exposure is what
+        # makes detections repeatable on a moving bot, and AE hunting moves the
+        # detector's heatmap peaks frame to frame. The v4l2 backend has no AE:
+        # the sensor runs at its own exposure and analogue_gain controls, set
+        # with v4l2-ctl on the sensor subdev.
         self.declare_parameter('exposure_time_us', 0)
         self.declare_parameter('analogue_gain', 0.0)
         # The longest gap tolerated before the stream counts as dead and the
@@ -363,9 +367,10 @@ class CameraNode(Node):
                     self._drop(f'read failed: {e}')
                     continue
                 # The sensor is meant to pace us -- picamera2's
-                # FrameDurationLimits pins the OV2311 to frame_rate -- so this
-                # normally never fires. It is here because that pacing is a
-                # request, not a guarantee: if the Arducam fork ignores it we
+                # FrameDurationLimits, or on v4l2 the vertical blanking that
+                # camera-pipeline-pi.sh sets, pins the OV2311 to frame_rate -- so
+                # this normally never fires. It is here because that pacing is a
+                # request, not a guarantee: if it is missed or mismatched we
                 # would publish at sensor rate, and 60 fps is six times the
                 # bandwidth this node exists to avoid. Dropping the surplus
                 # BEFORE the downscale and the PNG encode is what makes the

@@ -1,19 +1,19 @@
-"""V4L2 fallback via OpenCV, for when libcamera is not an option.
+"""V4L2 backend via OpenCV: the default, and the one that works on the Pi 5.
 
-SCOPE, honestly: on a Raspberry Pi 5 the CSI path runs through rp1-cfe with a
-media-controller graph that libcamera sets up, so opening /dev/video0 directly
-will generally NOT produce OV2311 frames without media-ctl work that this module
-does not do. Do not reach for this expecting a drop-in replacement for picam.py
-on this hardware.
+On a Pi 5 the CSI path runs through rp1-cfe's media-controller graph, which
+libcamera would normally configure. This module does not touch the graph:
+docker/camera-pipeline-pi.sh sets it up on the host, at every boot once
+host-setup-pi.sh has installed it as a service. That puts the sensor in its
+native 8-bit mono mode (Y8_1X8, 1600x1300), links it through csi2 to
+rp1-cfe-csi2_ch0 (/dev/video0) and paces it to 10 fps through vertical
+blanking. Without that setup, /dev/video0 opens but never delivers a frame.
 
-What it is actually for:
+Why not picamera2 on the Pi: it needs Arducam's libcamera for this sensor, which
+ships for Raspberry Pi OS only (Debian bookworm / trixie). This image is Ubuntu
+noble, and its stock libcamera reports no cameras at all.
 
-  * a USB/UVC mono camera during development, where it works as-is;
-  * a Pi-4-style unicam path, where /dev/video0 is the sensor;
-  * the escape route if Arducam's libcamera build will not import under this
-    image's python (their .debs target Debian bookworm / python 3.11, the ROS
-    Jazzy base is Ubuntu noble / python 3.12). In that case this module plus a
-    media-ctl setup script is the path that needs no userspace libcamera at all.
+The same module serves a USB/UVC mono camera during development, and a
+Pi-4-style unicam path, where /dev/video0 is the sensor and needs no setup.
 
 It reuses frames.* for every transformation, so the geometry is identical to the
 picamera2 path and is covered by the same tests.
@@ -45,10 +45,9 @@ class V4L2Backend(CameraBackend):
         if not cap.isOpened():
             cap.release()
             raise CameraError(
-                f'cannot open {self._device} with the V4L2 backend. On a Pi 5 the '
-                'CSI sensor is behind a media-controller graph that libcamera '
-                'configures, so a bare open often will not work -- see this '
-                "module's docstring.")
+                f'cannot open {self._device} with the V4L2 backend. On a Pi 5, '
+                'check the camera is detected (dmesg | grep -i pivariety) and '
+                'that docker/camera-pipeline-pi.sh reported this device.')
         # CONVERT_RGB off keeps OpenCV from forcing a 3-channel BGR conversion,
         # which would triple the data and then need converting straight back.
         cap.set(cv2.CAP_PROP_CONVERT_RGB, 0)
@@ -68,8 +67,13 @@ class V4L2Backend(CameraBackend):
         ok, frame = self._cap.read()
         if not ok or frame is None:
             # VideoCapture gives us no way to distinguish "not yet" from
-            # "broken", so treat it as a stall and let the node reopen.
-            raise TimeoutError(f'no frame from {self._device}')
+            # "broken", so treat it as a stall and let the node reopen. On a Pi 5
+            # the usual cause is an unconfigured CSI pipeline (after a reboot
+            # without the boot service, or after rpicam-*/libcamera ran).
+            raise TimeoutError(
+                f'no frame from {self._device}. On a Pi 5, is the CSI pipeline '
+                'configured? Run docker/camera-pipeline-pi.sh on the host, and '
+                'this node reconnects by itself')
         if frame.ndim == 3:
             # The driver ignored CONVERT_RGB. Take one channel rather than a
             # weighted conversion: the sensor is mono, so the three are equal and

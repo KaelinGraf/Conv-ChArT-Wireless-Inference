@@ -1,8 +1,10 @@
 """picamera2 backend: the raw mono stream, with the ISP bypassed.
 
-This is the default, and it is the module that cannot be tested without the
-sensor. All of its arithmetic therefore lives in frames.py, which can; what is
-left here is configuration and buffer handling.
+Not the default: on the Pi it needs Arducam's libcamera, which ships for
+Raspberry Pi OS only and cannot be installed in this Ubuntu image, so v4l2 is
+the default there (see backends/v4l2.py). It is also the module that cannot be
+tested without the sensor. All of its arithmetic therefore lives in frames.py,
+which can; what is left here is configuration and buffer handling.
 
 Why the RAW stream and not the processed one: the OV2311 is monochrome and has no
 colour filter array, so there is nothing for a debayering ISP to do. Going
@@ -54,11 +56,10 @@ class Picamera2Backend(CameraBackend):
         except ImportError as e:
             raise CameraError(
                 f'picamera2 is not importable ({e}). On the Pi this needs '
-                "Arducam's libcamera build and their picamera2 fork; see the "
-                'WITH_CAMERA block in docker/pi/Dockerfile. Note their .debs '
-                'target Debian bookworm / python 3.11 while this image is Ubuntu '
-                'noble / python 3.12 -- if the binding will not import, the v4l2 '
-                'backend is the documented fallback.') from e
+                "Arducam's libcamera build and their picamera2 fork, which ship "
+                'for Raspberry Pi OS only and cannot install in this Ubuntu image '
+                '(see the WITH_CAMERA block in docker/pi/Dockerfile). Use the '
+                'default v4l2 backend.') from e
 
         try:
             cam = Picamera2(self._index)

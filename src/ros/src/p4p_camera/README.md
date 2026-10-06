@@ -56,11 +56,18 @@ does.
 ## How the 10 Hz is held
 
 There is no ROS timer and no `sleep` in the node. `_capture_loop` is a tight loop
-that blocks inside `backend.read(timeout)`, so **the sensor sets the cadence**:
-`picam` asks for it with `FrameDurationLimits = (period, period)`, which pins the
-OV2311 to `frame_rate` rather than our capturing at 60 fps and throwing away five
-of every six frames. The mock paces against an absolute `time.monotonic` deadline,
-so it cannot accumulate the drift a fixed `sleep(period)` would.
+that blocks inside `backend.read(timeout)`, so **the sensor sets the cadence**.
+On `v4l2`, `camera-pipeline-pi.sh` sets the sensor's vertical blanking for
+`FPS` (default 10). On `picam`, the backend asks for
+`FrameDurationLimits = (period, period)`. Either way the OV2311 is pinned to
+`frame_rate`, rather than our capturing at 60 fps and throwing away five of
+every six frames.
+
+**Keep the script's `FPS` equal to `frame_rate`.** A slower sensor starves the
+node. A faster one is caught by the surplus guard below, at a CPU cost.
+
+The mock paces against an absolute `time.monotonic` deadline, so it cannot
+accumulate the drift a fixed `sleep(period)` would.
 
 **If our side overruns the period** (a slow encode), nothing waits — we simply
 arrive late for the next read. `queue=False` in the picamera2 configuration means
@@ -86,22 +93,37 @@ no frames, because they look exactly like a working camera.
 
 | value | what it is |
 |---|---|
-| `picamera2` | default. Raw mono stream with the **ISP bypassed** |
-| `v4l2` | fallback; see the caveat below |
+| `v4l2` | default. The sensor's native 8-bit mono mode straight off `rp1-cfe`; needs the host's CSI pipeline configured (below) |
+| `picamera2` | raw mono stream with the ISP bypassed; needs Arducam's libcamera, which this image cannot have (below) |
 | `mock` | synthetic or replayed frames, no hardware |
 
-The ISP is bypassed because the sensor is monochrome and has no colour filter
-array, so there is nothing for a debayering ISP to do. It also sidesteps
-libcamera's `Configuration file 'arducam-pivariety_mono.json' not found for IPA
-module 'rpi/pisp'` on a Pi 5 — Arducam document that as benign, but there is no
-reason to let a missing tuning file apply gamma or sharpening to the pixels the
-refiner measures.
+**`v4l2` on a Pi 5.** The CSI path runs through `rp1-cfe`'s media-controller
+graph, which libcamera would normally configure. Here
+`docker/camera-pipeline-pi.sh` does it on the host instead:
+- **Mode:** the sensor runs in its native `Y8_1X8` mode at 1600×1300.
+- **Route:** the frames go through `csi2` to `rp1-cfe-csi2_ch0`, which is
+  `/dev/video0`. They arrive as plain `GREY`, with nothing to unpack.
+- **Rate:** the sensor is paced to 10 fps through vertical blanking.
 
-**`v4l2` is not a drop-in replacement on a Pi 5.** The CSI path runs through
-`rp1-cfe` with a media-controller graph that libcamera configures, so a bare
-`/dev/video0` open generally will not produce OV2311 frames. It is there for a
-USB/UVC camera during development, a Pi-4-style unicam path, and as the escape
-route if Arducam's libcamera will not import under this image's Python.
+`docker/host-setup-pi.sh` installs the script as `p4p-camera-pipeline.service`,
+which runs at every boot. Without that setup `/dev/video0` opens but never
+delivers a frame, and the node logs `no frame from /dev/video0` until it is
+configured. The same backend serves a USB/UVC camera during development, or a
+Pi-4-style unicam path, with no setup.
+
+**Why not `picamera2` on the Pi.** The OV2311 needs Arducam's libcamera fork:
+- **Not installable here:** the fork ships for Raspberry Pi OS (bookworm and
+  trixie) only. Its installer has nothing for this image's Ubuntu noble.
+- **Stock libcamera is no help:** it reports "No cameras available", whether
+  the one in the image or the Pi's own.
+
+The backend stays for a host where Arducam's stack does install. It bypasses
+the ISP because the sensor is monochrome and has no colour filter array, so
+there is nothing for a debayering ISP to do. That also sidesteps libcamera's
+`Configuration file 'arducam-pivariety_mono.json' not found for IPA module
+'rpi/pisp'`: Arducam document it as benign, but there is no reason to let a
+missing tuning file apply gamma or sharpening to the pixels the refiner
+measures.
 
 `mock` earns its keep beyond the tests: with `mock_image` pointing at a recorded
 1600×1200 board frame, the whole chain — including the laptop's real inference
@@ -111,7 +133,7 @@ node over actual WiFi — runs with no camera in the building.
 
 | name | default | note |
 |---|---|---|
-| `camera_backend` | `picamera2` | `picamera2`, `v4l2` or `mock`. A typo is fatal, not clamped |
+| `camera_backend` | `v4l2` | `v4l2`, `picamera2` or `mock`. A typo is fatal, not clamped |
 | `camera_index` | `0` | a Pi 5 has two CSI ports |
 | `device` | `/dev/video0` | `v4l2` only |
 | `frame_rate` | `10.0` | **floored at 5.0**: below that no offered deadline fits inside the 0.2 s the inference node requests |
@@ -119,8 +141,8 @@ node over actual WiFi — runs with no camera in the building.
 | `png_level` | `1` | CPU vs bytes only, never quality. **Must stay lossless** — JPEG would bias the refiner |
 | `crop_top` | `50` | see the warning above. Overridden if the sensor windows to 1600×1200 itself |
 | `prefer_8bit` | `true` | an 8-bit mode halves CSI bandwidth and loses nothing we keep |
-| `exposure_time_us` | `0` | 0 leaves AE alone; pin it once the arena lighting is known |
-| `analogue_gain` | `0.0` | 0 is auto; set with `exposure_time_us` |
+| `exposure_time_us` | `0` | `picamera2` only. 0 leaves AE alone; pin it once the arena lighting is known. On `v4l2` there is no AE: see the sensor table below |
+| `analogue_gain` | `0.0` | `picamera2` only. 0 is auto; set with `exposure_time_us` |
 | `frame_timeout` | `1.0` | longest gap before the stream counts as dead |
 | `reconnect_period` | `1.0` | retry interval while the camera is missing |
 | `buffer_count` | `4` | libcamera buffers |
@@ -134,6 +156,30 @@ node over actual WiFi — runs with no camera in the building.
 
 Rates are clamped loudly rather than fatally, as in `p4p_serial_bridge`: a bot
 already on the floor is better off running with a safe value than not at all.
+
+## The sensor, as measured on the Pi 5
+
+These values were read off the hardware with `media-ctl -p` and `v4l2-ctl -l` on
+the sensor subdev. Where the board sits:
+- **Driver:** `arducam-pivariety`, Pivariety firmware `0x10002`, at i2c
+  `11-000c`.
+- **Port:** CAM/DISP 1. For CAM/DISP 0, append `,cam0` to the overlay.
+
+| | |
+|---|---|
+| modes | `Y8_1X8` and `Y10_1X10`, both 1600×1300 |
+| `pixel_rate` | 160 MHz, read-only |
+| `horizontal_blanking` | 208, fixed |
+| `vertical_blanking` | 174–16399. 174 gives ~60 fps, 7550 gives 10 fps, 16399 gives ~5 fps |
+| `exposure` | 1–65523, default 800 |
+| `analogue_gain` | 100–3100, default 100 |
+
+The frame rate follows from
+`pixel_rate / ((1600 + hblank) × (1300 + vblank))`.
+
+On `v4l2` nothing runs auto-exposure. Set exposure and gain directly on the
+sensor subdev, which `camera-pipeline-pi.sh` prints:
+`v4l2-ctl -d /dev/v4l-subdevN -c exposure=…,analogue_gain=…`.
 
 ## Three things that will bite you if you change them
 
@@ -186,7 +232,8 @@ ros2 launch p4p_camera camera.launch.py camera_backend:=mock
 ros2 run p4p_camera camera_node --ros-args \
   -p camera_backend:=mock -p mock_image:=/workspace/board.png
 
-# on the Pi, with the camera attached
+# on the Pi, with the camera attached and the CSI pipeline configured
+# (p4p-camera-pipeline.service does it at boot; by hand: sudo docker/camera-pipeline-pi.sh)
 ros2 launch p4p_camera camera.launch.py
 
 # check it
