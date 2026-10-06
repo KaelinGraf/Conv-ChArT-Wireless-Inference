@@ -71,7 +71,7 @@ class CameraNode(Node):
     def __init__(self, **kwargs):
         super().__init__('camera_node', **kwargs)
 
-        self.declare_parameter('camera_backend', 'picamera2')
+        self.declare_parameter('camera_backend', 'v4l2')
         self.declare_parameter('camera_index', 0)
         self.declare_parameter('device', '/dev/video0')
         self.declare_parameter('frame_rate', 10.0)

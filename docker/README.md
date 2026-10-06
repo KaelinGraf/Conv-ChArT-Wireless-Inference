@@ -11,7 +11,8 @@ talking over WiFi to the machine that runs the inference node in `src/ros`.
 | `docker/pi/smoke_test.py` | runtime check: rclpy + RMW, numpy/scipy, serial ports, tf_transformations |
 | `docker/common/` | entrypoint + shell environment: sources ROS 2, the `src/ros` overlay once it is built, and the CycloneDDS profile |
 | `docker/ros/cyclonedds.xml` | CycloneDDS profile for the WiFi link (use the same file on the laptop) |
-| `docker/host-setup-pi.sh` | one-time Pi host setup: Docker Engine, `docker`/`dialout` groups, UDP buffer sysctls |
+| `docker/host-setup-pi.sh` | one-time Pi host setup: Docker Engine, `docker`/`dialout` groups, UDP buffer sysctls, the camera pipeline boot service |
+| `docker/camera-pipeline-pi.sh` | configures the Pi 5 CSI pipeline for `p4p_camera`'s `v4l2` backend; run at boot by `p4p-camera-pipeline.service` |
 
 ## 1. Host setup (once per Pi)
 
@@ -45,45 +46,51 @@ scp convchart-pi.tar.gz <user>@<pi-ip>:
 gunzip -c convchart-pi.tar.gz | docker load
 ```
 
-Camera: `WITH_CAMERA=1` in `.env` (then rebuild) adds `v4l-utils`, `v4l2_camera` (USB
-cameras), `image_transport_plugins` (the `compressed` and `zstd` transports) and **Arducam's
-libcamera fork plus their picamera2**, which is what `p4p_camera` drives the Pivariety OV2311
-with. `camera_ros` is deliberately *not* installed: Arducam's packages replace the distro
-libcamera, and `camera_ros` is built against the distro ABI.
+Camera: the image needs nothing extra. `p4p_camera`'s default `v4l2` backend reads the
+Pivariety OV2311 through V4L2 with OpenCV, which the base image already has. The camera
+needs three things set up on the host:
 
-Three things the image cannot do for you:
+1. **The kernel driver and overlay.** `/boot/firmware/config.txt` needs:
+   - `camera_auto_detect=0`;
+   - `dtoverlay=arducam-pivariety`. If the ribbon is in CAM/DISP 0, append `,cam0`; the
+     default is CAM/DISP 1.
 
-1. **The kernel driver and overlay are the host's job.** `/boot/firmware/config.txt` needs
-   `camera_auto_detect=0` and `dtoverlay=arducam-pivariety`, then a reboot. Never run the
-   Arducam script's `-p kernel_driver` inside the container: it builds against the host kernel
-   and writes to `/boot/firmware/config.txt`, i.e. the wrong machine.
-2. **Device passthrough is a separate compose service.** The plain `pi` service passes through
-   no camera nodes, because a listed-but-absent device stops the container. Use the profile:
-   `docker compose --profile camera up -d pi-camera`. It starts `privileged` for first
-   bring-up; narrow it to a `device_cgroup_rules` allow-list once `ls -l /dev/video*
-   /dev/media* /dev/v4l-subdev* /dev/dma_heap/*` on the real Pi gives you the major numbers.
-   libcamera needs more than `/dev/video0`: `/dev/media*` is the media controller it
-   *configures the pipeline through* (missing it is the classic "no cameras available" inside
-   Docker), and `/dev/dma_heap` is where a Pi 5 allocates frame buffers.
-3. **Verify the binding imports before anything else.** Arducam's `.debs` target Raspberry Pi
-   OS (Debian bookworm, python 3.11); this base is Ubuntu noble with python 3.12, and
-   `python3-libcamera` is a compiled binding. The build warns rather than failing if it will
-   not install, so check it explicitly, inside the container:
+   Then reboot. `dmesg | grep -i pivariety` should report the board's firmware version.
 
-   ```bash
-   python3 -c "from picamera2 import Picamera2; import pprint; pprint.pp(Picamera2().sensor_modes)"
-   ```
+   Never run the Arducam script's `-p kernel_driver` inside the container. It builds
+   against the host kernel and writes to `/boot/firmware/config.txt`, i.e. the wrong
+   machine.
+2. **The CSI pipeline.** On a Pi 5 the sensor sits behind `rp1-cfe`'s media-controller graph,
+   which libcamera would normally configure. `docker/camera-pipeline-pi.sh` does it with
+   `media-ctl` instead: 8-bit mono 1600x1300 to `/dev/video0`, with the sensor paced to
+   10 fps.
+   - **At boot:** `host-setup-pi.sh` installs it as `p4p-camera-pipeline.service`, which runs
+     at every boot.
+   - **Re-run it** with `sudo /usr/local/sbin/p4p-camera-pipeline` if anything else
+     reconfigures the graph, for example `rpicam-hello` on the host.
+   - **Check it** with `v4l2-ctl -d /dev/video0 --stream-mmap --stream-count=30
+     --stream-to=/dev/null`, which should report ~10 fps.
+3. **Device passthrough, through a separate compose service.** The plain `pi` service passes
+   through no camera nodes, because a listed-but-absent device stops the container.
+   - **Use the profile:** `docker compose --profile camera up -d pi-camera`.
+   - **Privileges:** it starts `privileged`. Narrow that to a `device_cgroup_rules` allow-list
+     once `ls -l /dev/video* /dev/media* /dev/v4l-subdev*` on the real Pi gives you the major
+     numbers.
+   - **The `v4l2` path uses only `/dev/video0`.** The service's `/run/udev`, `/dev/media*` and
+     `/dev/dma_heap` are there for libcamera.
 
-   This one command proves the userspace imports, that udev enumeration crosses the container
-   boundary, and that dma_heap works. Its output is also the fixture for
-   `p4p_camera.frames.pick_mode`'s tests. If it fails, the fallbacks in increasing cost are:
-   build the fork from source against python 3.12; use `p4p_camera`'s `v4l2` backend with a
-   `media-ctl` setup script, which needs no userspace libcamera at all; or run the camera node
-   on the host, where Arducam's stack installs natively.
+`WITH_CAMERA=1` (rebuild after changing) adds `v4l-utils`, `v4l2_camera` (USB cameras) and
+`image_transport_plugins` (the `compressed` and `zstd` transports). It also tries to install
+**Arducam's libcamera fork plus their picamera2** for the `picamera2` backend, which cannot
+succeed on this base:
+- **No packages for this OS:** Arducam publish packages for Raspberry Pi OS (bookworm and
+  trixie) only.
+- **The installer stops:** it ends with "Unsupported package" on Ubuntu noble.
+- **The build carries on:** it warns, so the `picamera2` backend stays unavailable in this
+  image.
 
-Arducam also warn that a system `apt upgrade` silently replaces their libcamera with
-Raspberry Pi's, which breaks a working camera. The image `apt-mark hold`s it; don't run
-`apt upgrade` in a live container, rebuild instead.
+`camera_ros` is deliberately *not* installed: Arducam's packages would replace the distro
+libcamera it is built against.
 
 ## 3. Run
 
@@ -120,9 +127,11 @@ cannot create a node there (see the note further down), and the graph tests are 
 New shells source `src/ros/install/setup.bash` automatically.
 
 - Use `bash -c "..."` for one-shot commands: `docker compose exec pi python3 ...` skips the ROS environment.
-- The Arduino Mega 2560 is passed through as `/dev/ttyACM0` (set `ARDUINO_PORT` if the host
-  names it differently). Docker will not start the container when that device is missing, so
-  remove the `devices:` entry in `compose.yaml` if no Arduino is attached.
+- The Arduino Mega 2560 is passed through as `/dev/ttyACM0`. Set `ARDUINO_PORT` if the host
+  names it differently.
+  - Docker will not start the container when that device is missing. While no Arduino is
+    attached, set `ARDUINO_PORT=/dev/null` in `.env`.
+  - The containers then start, and the serial bridge has nothing to talk to.
 - `cap_add: SYS_NICE` + `ulimits.rtprio` allow `SCHED_FIFO` / negative nice for a fixed-rate loop.
 - `command: sleep infinity` is a placeholder; swap it for `ros2 launch ...` once the nodes
   exist. `restart: unless-stopped` brings the container back after a reboot.

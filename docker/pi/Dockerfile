@@ -5,9 +5,10 @@
 #   + osqp/qpsolvers (constrained MPC QP) + pyserial (Arduino Mega 2560 over
 #   /dev/ttyACM0, IMU packets + motor commands) + tf2 / tf_transformations + both
 #   WiFi-friendly RMWs (CycloneDDS, Zenoh). No ML dependencies of any kind.
-#   + OpenCV (p4p_camera's downscale and PNG encode).
-#   Camera stack is opt-in: --build-arg WITH_CAMERA=1 adds v4l-utils and
-#   Arducam's libcamera fork + picamera2 for the Pivariety OV2311.
+#   + OpenCV (p4p_camera's v4l2 capture, downscale and PNG encode -- all the
+#   camera needs; its CSI pipeline is set up on the host, see docker/README.md).
+#   --build-arg WITH_CAMERA=1 adds v4l-utils, v4l2_camera and the image_transport
+#   plugins; its Arducam libcamera + picamera2 step cannot install on this base.
 #
 # Build context is ./docker (see compose.yaml). Same layout / entrypoint / user
 # as the GPU image so a node developed on the laptop runs unchanged here.
@@ -41,7 +42,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         ros-${ROS_DISTRO}-demo-nodes-py \
     && if [ "${WITH_CAMERA}" = "1" ]; then apt-get install -y --no-install-recommends \
         v4l-utils \
-        python3-kms++ python3-prctl libatlas-base-dev \
+        python3-prctl libatlas-base-dev \
         ros-${ROS_DISTRO}-v4l2-camera \
         ros-${ROS_DISTRO}-image-transport-plugins ; fi \
     && rm -rf /var/lib/apt/lists/* \
