@@ -5,7 +5,7 @@ Owns the camera and nothing else: no filtering, no pose, no control.
 
 | direction | name | type | notes |
 |---|---|---|---|
-| out | `image` | `sensor_msgs/CompressedImage` | 640×480 mono8 PNG, 10 Hz |
+| out | `image` | `sensor_msgs/CompressedImage` | 640×480 mono8 PNG, 15 Hz |
 | out | `camera_info` | `sensor_msgs/CameraInfo` | intrinsics **for that 640×480** |
 | srv | `image_full_res` | `convchart_interfaces/GetFullResImage` | newest 1600×1200 frame |
 
@@ -53,12 +53,12 @@ does.
 `ros2 service call` prints the response as a 2 MB decimal array, so use
 `tools/grab_full_res.py -o /tmp/frame.png`.
 
-## How the 10 Hz is held
+## How the 15 Hz is held
 
 There is no ROS timer and no `sleep` in the node. `_capture_loop` is a tight loop
 that blocks inside `backend.read(timeout)`, so **the sensor sets the cadence**.
 On `v4l2`, `camera-pipeline-pi.sh` sets the sensor's vertical blanking for
-`FPS` (default 10). On `picam`, the backend asks for
+`FPS` (default 15). On `picam`, the backend asks for
 `FrameDurationLimits = (period, period)`. Either way the OV2311 is pinned to
 `frame_rate`, rather than our capturing at 60 fps and throwing away five of
 every six frames.
@@ -103,7 +103,7 @@ graph, which libcamera would normally configure. Here
 - **Mode:** the sensor runs in its native `Y8_1X8` mode at 1600×1300.
 - **Route:** the frames go through `csi2` to `rp1-cfe-csi2_ch0`, which is
   `/dev/video0`. They arrive as plain `GREY`, with nothing to unpack.
-- **Rate:** the sensor is paced to 10 fps through vertical blanking.
+- **Rate:** the sensor is paced to 15 fps through vertical blanking.
 
 `docker/host-setup-pi.sh` installs the script as `p4p-camera-pipeline.service`,
 which runs at every boot. Without that setup `/dev/video0` opens but never
@@ -136,7 +136,7 @@ node over actual WiFi — runs with no camera in the building.
 | `camera_backend` | `v4l2` | `v4l2`, `picamera2` or `mock`. A typo is fatal, not clamped |
 | `camera_index` | `0` | a Pi 5 has two CSI ports |
 | `device` | `/dev/video0` | `v4l2` only |
-| `frame_rate` | `10.0` | **floored at 5.0**: below that no offered deadline fits inside the 0.2 s the inference node requests |
+| `frame_rate` | `15.0` | **floored at 5.0**: below that no offered deadline fits inside the 0.2 s the inference node requests |
 | `frame_id` | `pi_camera` | what the pose consumer expects |
 | `png_level` | `1` | CPU vs bytes only, never quality. **Must stay lossless** — JPEG would bias the refiner |
 | `crop_top` | `50` | see the warning above. Overridden if the sensor windows to 1600×1200 itself |
@@ -170,7 +170,7 @@ the sensor subdev. Where the board sits:
 | modes | `Y8_1X8` and `Y10_1X10`, both 1600×1300 |
 | `pixel_rate` | 160 MHz, read-only |
 | `horizontal_blanking` | 208, fixed |
-| `vertical_blanking` | 174–16399. 174 gives ~60 fps, 7550 gives 10 fps, 16399 gives ~5 fps |
+| `vertical_blanking` | 174–16399. 174 gives ~60 fps, 4600 gives 15 fps, 7550 gives 10 fps, 16399 gives ~5 fps |
 | `exposure` | 1–65523, default 800 |
 | `analogue_gain` | 100–3100, default 100 |
 
@@ -198,7 +198,7 @@ would satisfy the type and silently break the ownership.
 
 **3. `close()` joins the capture thread before `destroy_node()`.** The capture
 thread publishes, and `publish()` on a destroyed publisher is a segfault. At
-10 Hz the thread is mid-publish a noticeable fraction of the time.
+15 Hz the thread is mid-publish a noticeable fraction of the time.
 
 Unlike `p4p_serial_bridge`, this node uses a `MultiThreadedExecutor` with the
 service in its own callback group. That is not gratuitous: the bridge's

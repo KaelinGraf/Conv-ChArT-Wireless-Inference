@@ -20,7 +20,7 @@ def generate_launch_description():
     args = [
         DeclareLaunchArgument('camera_backend', default_value='v4l2',
                               description='v4l2, picamera2 or mock'),
-        DeclareLaunchArgument('frame_rate', default_value='10.0',
+        DeclareLaunchArgument('frame_rate', default_value='15.0',
                               description='stream rate in Hz; floored at 5.0'),
         DeclareLaunchArgument('frame_id', default_value='pi_camera'),
         DeclareLaunchArgument('device', default_value='/dev/video0',

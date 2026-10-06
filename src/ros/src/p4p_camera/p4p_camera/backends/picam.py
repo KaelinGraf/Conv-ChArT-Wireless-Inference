@@ -40,7 +40,7 @@ class Picamera2Backend(CameraBackend):
         self._prefer_8bit = bool(params.get('prefer_8bit', True))
         self._crop_top = int(params.get('crop_top', frames.CROP_TOP))
         self._buffer_count = int(params.get('buffer_count', 4))
-        self._frame_rate = float(params.get('frame_rate', 10.0))
+        self._frame_rate = float(params.get('frame_rate', 15.0))
         self._exposure_us = int(params.get('exposure_time_us', 0))
         self._gain = float(params.get('analogue_gain', 0.0))
         self._cam = None

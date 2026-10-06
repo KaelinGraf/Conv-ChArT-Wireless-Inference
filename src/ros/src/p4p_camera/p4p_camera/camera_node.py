@@ -5,7 +5,7 @@ belong in the nodes on either side of it.
 
 One topic, one service, and deliberately not two topics:
 
-    image             sensor_msgs/CompressedImage   out  640x480 mono8 PNG, 10 Hz
+    image             sensor_msgs/CompressedImage   out  640x480 mono8 PNG, 15 Hz
     camera_info       sensor_msgs/CameraInfo        out  intrinsics FOR THAT 640x480
     image_full_res    convchart_interfaces/..       srv  the newest 1600x1200 frame
 
@@ -35,7 +35,7 @@ Three invariants worth not breaking:
   * Frames handed out by a backend are copies, not views into its DMA buffer, so
     the service can spend 40 ms encoding one while capture moves on.
   * close() joins the capture thread BEFORE destroy_node(). publish() on a
-    destroyed publisher is a segfault, and at 10 Hz the thread is mid-publish a
+    destroyed publisher is a segfault, and at 15 Hz the thread is mid-publish a
     noticeable fraction of the time.
 """
 from __future__ import annotations
@@ -74,7 +74,7 @@ class CameraNode(Node):
         self.declare_parameter('camera_backend', 'v4l2')
         self.declare_parameter('camera_index', 0)
         self.declare_parameter('device', '/dev/video0')
-        self.declare_parameter('frame_rate', 10.0)
+        self.declare_parameter('frame_rate', 15.0)
         self.declare_parameter('frame_id', 'pi_camera')
         self.declare_parameter('png_level', 1)
         self.declare_parameter('crop_top', frames.CROP_TOP)
