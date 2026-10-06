@@ -18,3 +18,21 @@ BOARD:
 CAMERA:
   K: null
   dist: null
+
+CALIBRATION:
+  board:
+    squares: [5, 5]
+    square_length_m: 1.0
+    marker_length_m: null
+    marker_ratio: 0.7
+    dictionary: DICT_5X5_50
+    first_marker_id: 0
+    legacy_pattern: false
+  min_corners: null
+  min_views: 12
+  review_s: 2.0
+  outlier_factor: 3.0
+  fix_k3: false
+  coverage_grid: [6, 8]
+  converge_rel_sigma_f: 0.002
+  converge_sigma_c_px: 1.0
