@@ -5,7 +5,9 @@
 #   + osqp/qpsolvers (constrained MPC QP) + pyserial (Arduino Mega 2560 over
 #   /dev/ttyACM0, IMU packets + motor commands) + tf2 / tf_transformations + both
 #   WiFi-friendly RMWs (CycloneDDS, Zenoh). No ML dependencies of any kind.
-#   Camera stack is opt-in: --build-arg WITH_CAMERA=1.
+#   + OpenCV (p4p_camera's downscale and PNG encode).
+#   Camera stack is opt-in: --build-arg WITH_CAMERA=1 adds v4l-utils and
+#   Arducam's libcamera fork + picamera2 for the Pivariety OV2311.
 #
 # Build context is ./docker (see compose.yaml). Same layout / entrypoint / user
 # as the GPU image so a node developed on the laptop runs unchanged here.
@@ -30,6 +32,7 @@ SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 RUN apt-get update && apt-get install -y --no-install-recommends \
         sudo nano less usbutils iproute2 iputils-ping \
         python3-pip python3-numpy python3-scipy python3-serial python3-yaml \
+        python3-opencv wget ca-certificates \
         ros-${ROS_DISTRO}-tf2-ros \
         ros-${ROS_DISTRO}-tf2-geometry-msgs \
         ros-${ROS_DISTRO}-tf-transformations \
@@ -38,13 +41,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         ros-${ROS_DISTRO}-demo-nodes-py \
     && if [ "${WITH_CAMERA}" = "1" ]; then apt-get install -y --no-install-recommends \
         v4l-utils \
-        ros-${ROS_DISTRO}-camera-ros \
+        python3-kms++ python3-prctl libatlas-base-dev \
         ros-${ROS_DISTRO}-v4l2-camera \
         ros-${ROS_DISTRO}-image-transport-plugins ; fi \
     && rm -rf /var/lib/apt/lists/* \
     && python3 -m pip install osqp==1.1.3 qpsolvers==4.13.0 \
     && source /opt/ros/${ROS_DISTRO}/setup.bash \
-    && python3 -c "import rclpy, numpy, scipy, serial, yaml, tf_transformations, transforms3d, osqp, qpsolvers; print('pi deps OK numpy', numpy.__version__, 'scipy', scipy.__version__, 'pyserial', serial.__version__, 'osqp', osqp.__version__)"
+    && python3 -c "import rclpy, numpy, scipy, serial, yaml, cv2, tf_transformations, transforms3d, osqp, qpsolvers; print('pi deps OK numpy', numpy.__version__, 'scipy', scipy.__version__, 'pyserial', serial.__version__, 'cv2', cv2.__version__, 'osqp', osqp.__version__)"
 
 RUN python3 -m pip install --no-deps ros2-numpy==0.0.5 \
     && d="$(python3 -m pip show ros2-numpy | sed -n 's/^Location: //p')/ros2_numpy" \
@@ -61,6 +64,33 @@ RUN python3 -m pip install --no-deps ros2-numpy==0.0.5 \
                    for m in (rnp.msgify(Pose, T).orientation, rnp.msgify(Transform, T).rotation)); \
         assert all(np.allclose(rnp.numpify(rnp.msgify(M, T)), T) for M in (Pose, Transform)); \
         print('ros2_numpy OK: Image mono8, Pose/Transform in ROS (x, y, z, w) order')"
+
+ARG ARDUCAM_SCRIPT_URL=https://github.com/ArduCAM/Arducam-Pivariety-V4L2-Driver/releases/download/install_script/install_pivariety_pkgs.sh
+ARG ARDUCAM_PICAMERA2_REF=main
+RUN if [ "${WITH_CAMERA}" != "1" ]; then exit 0; fi; \
+    warn() { echo "WARNING(arducam): $*" >&2; }; \
+    ok=1; \
+    echo 'APT::Get::Assume-Yes "true";' > /etc/apt/apt.conf.d/90assumeyes; \
+    apt-get update || { warn "apt-get update failed"; ok=0; }; \
+    if [ "$ok" = 1 ]; then \
+        wget -qO /tmp/install_pivariety_pkgs.sh "${ARDUCAM_SCRIPT_URL}" \
+            || { warn "could not fetch ${ARDUCAM_SCRIPT_URL}"; ok=0; }; \
+    fi; \
+    if [ "$ok" = 1 ]; then \
+        chmod +x /tmp/install_pivariety_pkgs.sh; \
+        ( cd /tmp && ./install_pivariety_pkgs.sh -p libcamera_dev ) || warn "libcamera_dev failed"; \
+        ( cd /tmp && ./install_pivariety_pkgs.sh -p libcamera_apps ) || warn "libcamera_apps failed"; \
+        python3 -m pip install --no-deps \
+            "git+https://github.com/ArduCAM/picamera2@${ARDUCAM_PICAMERA2_REF}" \
+            || warn "the picamera2 fork would not install"; \
+        apt-mark hold libcamera0 libcamera-dev libcamera-apps libcamera-ipa >/dev/null 2>&1 \
+            || warn "could not apt-mark hold libcamera (an apt upgrade may silently replace it)"; \
+    fi; \
+    python3 -c "import libcamera, picamera2; print('picamera2 OK', picamera2.__version__)" \
+        || warn "picamera2 does not import in this image; use p4p_camera's v4l2 backend or build the fork from source (see above)"; \
+    rm -f /etc/apt/apt.conf.d/90assumeyes /tmp/install_pivariety_pkgs.sh; \
+    rm -rf /var/lib/apt/lists/*; \
+    exit 0
 
 RUN if id ubuntu >/dev/null 2>&1; then userdel -r ubuntu; fi \
     && (getent group "${USER_GID}" >/dev/null || groupadd --gid "${USER_GID}" "${USERNAME}") \

@@ -10,6 +10,7 @@ services:
       dockerfile: pi/Dockerfile
       args:
         WITH_CAMERA: ${WITH_CAMERA:-0}
+        ARDUCAM_PICAMERA2_REF: ${ARDUCAM_PICAMERA2_REF:-main}
         USER_UID: ${UID:-1000}
         USER_GID: ${GID:-1000}
     image: convchart-wireless/pi:jazzy
@@ -34,6 +35,18 @@ services:
       - SYS_NICE
     ulimits:
       rtprio: 99
+
+  pi-camera:
+    extends:
+      service: pi
+    profiles: ["camera"]
+    container_name: convchart-pi-camera
+    privileged: true
+    volumes:
+      - .:/workspace
+      - pi-home:/home/dev
+      - /run/udev:/run/udev:ro
+      - /dev/dma_heap:/dev/dma_heap
 
 volumes:
   pi-home:
