@@ -31,6 +31,9 @@ services:
       - pi-home:/home/dev
     devices:
       - ${ARDUINO_PORT:-/dev/ttyACM0}:/dev/ttyACM0
+      - ${I2C_DEV:-/dev/i2c-1}:/dev/i2c-1
+    group_add:
+      - "${I2C_GID:-994}"
     cap_add:
       - SYS_NICE
     ulimits:

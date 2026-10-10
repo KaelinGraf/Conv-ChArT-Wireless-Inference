@@ -9,7 +9,6 @@
 
   <depend>rclpy</depend>
   <depend>geometry_msgs</depend>
-  <depend>sensor_msgs</depend>
   <depend>std_srvs</depend>
   <depend>convchart_interfaces</depend>
   <depend>python3-serial</depend>

@@ -12,8 +12,12 @@ bridge's own telemetry back out of its command stream:
     drive/telemetry  convchart_interfaces/..     out   everything the Mega reports
     drive/status     convchart_interfaces/..     out   link and command health:
                                                        running, stopped, stalled
-    imu/data         sensor_msgs/Imu             out   the same heading and rate,
-                                                       in the standard type
+
+The BNO085 is wired to the Pi now, not the Mega, so this node no longer
+publishes sensor_msgs/Imu -- the node that owns the sensor does. The firmware
+still sends heading and gyro fields in every telemetry row and they still land
+on drive/telemetry, but NOTHING IS BEHIND THEM: treat heading_rad and yaw_rate
+there as garbage until the firmware stops sending them.
 
 The downlink runs on a FIXED-RATE TIMER, not on the cmd_vel callback. The
 firmware zeroes the motors if no V arrives within 400 ms, so a controller that
@@ -42,15 +46,10 @@ from rclpy.duration import Duration
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from rclpy.qos import QoSDurabilityPolicy, QoSHistoryPolicy, QoSProfile, QoSReliabilityPolicy
-from sensor_msgs.msg import Imu
 import serial
 from std_srvs.srv import SetBool
 
 from . import protocol
-
-_VAR_UNKNOWN = 1e6
-_VAR_YAW = 0.01
-_VAR_YAW_RATE = 1e-4
 
 
 class SerialBridge(Node):
@@ -67,7 +66,6 @@ class SerialBridge(Node):
         self.declare_parameter('auto_arm', False)
         self.declare_parameter('max_linear', 0.5)
         self.declare_parameter('max_angular', 2.08)
-        self.declare_parameter('publish_imu', True)
         self.declare_parameter('status_rate_hz', 2.0)
         self.declare_parameter('telemetry_timeout', 0.5)
         self.declare_parameter('frame_id', 'base_link')
@@ -118,8 +116,6 @@ class SerialBridge(Node):
 
         self._cmd_sub = self.create_subscription(Twist, 'cmd_vel', self._on_cmd_vel, cmd_qos)
         self._tel_pub = self.create_publisher(DriveTelemetry, 'drive/telemetry', tel_qos)
-        self._imu_pub = (self.create_publisher(Imu, 'imu/data', tel_qos)
-                         if self.get_parameter('publish_imu').value else None)
         status_qos = QoSProfile(history=QoSHistoryPolicy.KEEP_LAST, depth=5,
                                 reliability=QoSReliabilityPolicy.RELIABLE,
                                 durability=QoSDurabilityPolicy.TRANSIENT_LOCAL)
@@ -273,23 +269,6 @@ class SerialBridge(Node):
             self.get_logger().info(f'mega state: {protocol.describe_flags(tel.flags)}')
             self._last_flags = tel.flags
             self._publish_status()
-
-        if self._imu_pub is not None:
-            imu = Imu()
-            imu.header.stamp = stamp
-            imu.header.frame_id = self._frame_id
-            yaw = math.remainder(tel.heading_rad, 2.0 * math.pi)
-            imu.orientation.z = math.sin(yaw / 2.0)
-            imu.orientation.w = math.cos(yaw / 2.0)
-            imu.orientation_covariance = [_VAR_UNKNOWN, 0.0, 0.0,
-                                          0.0, _VAR_UNKNOWN, 0.0,
-                                          0.0, 0.0, _VAR_YAW]
-            imu.angular_velocity.z = yaw_rate
-            imu.angular_velocity_covariance = [_VAR_UNKNOWN, 0.0, 0.0,
-                                               0.0, _VAR_UNKNOWN, 0.0,
-                                               0.0, 0.0, _VAR_YAW_RATE]
-            imu.linear_acceleration_covariance[0] = -1.0
-            self._imu_pub.publish(imu)
 
     def _on_cmd_vel(self, msg: Twist) -> None:
         raw = (msg.linear.x, msg.linear.y, msg.angular.z)

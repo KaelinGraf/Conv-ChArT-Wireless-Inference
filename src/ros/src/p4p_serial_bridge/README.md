@@ -10,13 +10,23 @@ Mega. It owns the port and nothing else — no filtering, no fusing, no control.
 | in | `cmd_vel` | `geometry_msgs/Twist` |
 | out | `drive/telemetry` | `convchart_interfaces/DriveTelemetry` |
 | out | `drive/status` | `convchart_interfaces/DriveStatus` |
-| out | `imu/data` | `sensor_msgs/Imu` |
 | service | `~/arm` | `std_srvs/SetBool` — `true` arms (`E`), `false` is the e-stop (`S`) |
 
 **Why two topics and not one.** A topic is one-directional. A node subscribing to
 what it publishes builds a feedback loop, the two directions carry unrelated
 types, and the controller would have to filter the bridge's own telemetry back
 out of its command stream. Commands in, measurements out, separately.
+
+**No `imu/data` any more.** The BNO085 is wired to the Pi, not the Mega, so the
+node that owns the sensor publishes `sensor_msgs/Imu`; this bridge does not. That
+node is `p4p_imu` — see `src/ros/src/p4p_imu/README.md`.
+
+The firmware still sends heading and gyro columns in every telemetry row, and
+they still land on `drive/telemetry` as `heading_rad` and `yaw_rate`. **Nothing
+is behind them.** They are passed through unchanged rather than zeroed so a log
+shows what the Mega actually sent, but do not read them — take heading and yaw
+rate from the Pi's IMU node. `imu_resets` is dead for the same reason. Once the
+firmware drops those columns, the fields come off `DriveTelemetry.msg`.
 
 The firmware frame is already REP-103 — `+x` forward, `+y` left, `+z` up, right
 handed — so `Twist` maps straight through with no sign conversion. If the bot
@@ -70,12 +80,9 @@ command at `command_rate_hz` regardless, and substitutes zeros once that command
 is older than `cmd_timeout`. Two watchdogs in series: ours holds station and keeps
 feeding theirs; theirs catches us dying altogether.
 
-**`heading_rad` on `drive/telemetry` is unwrapped and must stay that way.** It
-passes ±π without discontinuity, because a filter takes differences of it. The
-quaternion on `imu/data` necessarily wraps, so `imu/data` is for off-the-shelf
-consumers like `robot_localization` — the filter in this project should read
-`drive/telemetry`. `applied` there is the twist the chassis actually acted on
-after saturation scaling, which is the input a predictor wants, not the request.
+**`applied` on `drive/telemetry` is not the request.** It is the twist the
+chassis actually acted on after uniform saturation scaling, which is the input a
+predictor wants — the request went the other way, over `cmd_vel`.
 
 ## Parameters
 
@@ -89,7 +96,6 @@ after saturation scaling, which is the input a predictor wants, not the request.
 | `auto_arm` | `false` | arms as soon as the Mega streams, **and again after any reboot or reconnect**. Left false, a reboot requires a fresh `~/arm` |
 | `max_linear` | `0.5` | `WHEEL_MAX_MPS` |
 | `max_angular` | `2.08` | `WHEEL_MAX_MPS / CHASSIS_L_PLUS_W` |
-| `publish_imu` | `true` | |
 | `status_rate_hz` | `2.0` | heartbeat only; transitions publish immediately |
 | `telemetry_timeout` | `0.5` | silence past this reads as `NO_TELEMETRY` |
 | `frame_id` | `base_link` | |
