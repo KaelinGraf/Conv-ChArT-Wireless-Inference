@@ -12,8 +12,12 @@ bridge's own telemetry back out of its command stream:
     drive/telemetry  convchart_interfaces/..     out   everything the Mega reports
     drive/status     convchart_interfaces/..     out   link and command health:
                                                        running, stopped, stalled
-    imu/data         sensor_msgs/Imu             out   the same heading and rate,
-                                                       in the standard type
+
+The BNO085 is wired to the Pi now, not the Mega, so this node no longer
+publishes sensor_msgs/Imu -- the node that owns the sensor does. The firmware
+still sends heading and gyro fields in every telemetry row and they still land
+on drive/telemetry, but NOTHING IS BEHIND THEM: treat heading_rad and yaw_rate
+there as garbage until the firmware stops sending them.
 
 The downlink runs on a FIXED-RATE TIMER, not on the cmd_vel callback. The
 firmware zeroes the motors if no V arrives within 400 ms, so a controller that
@@ -42,17 +46,10 @@ from rclpy.duration import Duration
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from rclpy.qos import QoSDurabilityPolicy, QoSHistoryPolicy, QoSProfile, QoSReliabilityPolicy
-from sensor_msgs.msg import Imu
 import serial
 from std_srvs.srv import SetBool
 
 from . import protocol
-
-# sensor_msgs/Imu: roll and pitch are never reported, and the BNO's game rotation
-# vector gives a relative yaw with no magnetometer behind it.
-_VAR_UNKNOWN = 1e6
-_VAR_YAW = 0.01          # (0.1 rad)^2, a placeholder until the BNO is characterised
-_VAR_YAW_RATE = 1e-4     # (0.01 rad/s)^2, likewise
 
 
 class SerialBridge(Node):
@@ -80,7 +77,6 @@ class SerialBridge(Node):
         # Clamping here only keeps the V line in range and bounds one axis gone mad.
         self.declare_parameter('max_linear', 0.5)
         self.declare_parameter('max_angular', 2.08)
-        self.declare_parameter('publish_imu', True)
         self.declare_parameter('status_rate_hz', 2.0)
         # How long telemetry may be absent before the link counts as silent. The
         # firmware streams at 50 Hz, so anything past a few periods is wrong.
@@ -140,8 +136,6 @@ class SerialBridge(Node):
 
         self._cmd_sub = self.create_subscription(Twist, 'cmd_vel', self._on_cmd_vel, cmd_qos)
         self._tel_pub = self.create_publisher(DriveTelemetry, 'drive/telemetry', tel_qos)
-        self._imu_pub = (self.create_publisher(Imu, 'imu/data', tel_qos)
-                         if self.get_parameter('publish_imu').value else None)
         # Status is latched: a supervisor or a filter that starts after the bridge
         # should learn the current state on connection, not on the next tick.
         status_qos = QoSProfile(history=QoSHistoryPolicy.KEEP_LAST, depth=5,
@@ -309,6 +303,9 @@ class SerialBridge(Node):
         msg.header.stamp = stamp
         msg.header.frame_id = self._frame_id
         msg.mega_t_ms = tel.t_ms & 0xFFFFFFFF
+        # Dead since the BNO085 moved to the Pi: the firmware still fills these
+        # columns, nothing reads the sensor behind them. Passed through unchanged
+        # rather than zeroed, so a log still shows exactly what the Mega sent.
         msg.heading_rad = tel.heading_rad
         msg.yaw_rate = yaw_rate
         msg.applied.linear.x, msg.applied.linear.y, msg.applied.angular.z = tel.applied
@@ -325,26 +322,6 @@ class SerialBridge(Node):
             self._last_flags = tel.flags
             # The firmware's own view just changed, which is what _classify reads.
             self._publish_status()
-
-        if self._imu_pub is not None:
-            imu = Imu()
-            imu.header.stamp = stamp
-            imu.header.frame_id = self._frame_id
-            # The quaternion wraps where heading_rad does not, which is exactly
-            # why the unwrapped value stays on the DriveTelemetry topic.
-            yaw = math.remainder(tel.heading_rad, 2.0 * math.pi)
-            imu.orientation.z = math.sin(yaw / 2.0)
-            imu.orientation.w = math.cos(yaw / 2.0)
-            imu.orientation_covariance = [_VAR_UNKNOWN, 0.0, 0.0,
-                                          0.0, _VAR_UNKNOWN, 0.0,
-                                          0.0, 0.0, _VAR_YAW]
-            imu.angular_velocity.z = yaw_rate
-            imu.angular_velocity_covariance = [_VAR_UNKNOWN, 0.0, 0.0,
-                                               0.0, _VAR_UNKNOWN, 0.0,
-                                               0.0, 0.0, _VAR_YAW_RATE]
-            # Element 0 at -1 is the sensor_msgs/Imu convention for "not measured".
-            imu.linear_acceleration_covariance[0] = -1.0
-            self._imu_pub.publish(imu)
 
     # --- downlink ----------------------------------------------------------
 
