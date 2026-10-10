@@ -1,0 +1,30 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>p4p_imu</name>
+  <version>0.0.1</version>
+  <description>BNO085 driver: game-rotation-vector heading, yaw rate and acceleration on imu/data</description>
+  <maintainer email="dev@todo.todo">dev</maintainer>
+  <license>Apache-2.0</license>
+
+  <depend>rclpy</depend>
+  <depend>sensor_msgs</depend>
+  <!-- Deliberately NOT convchart_interfaces: this node publishes the standard
+       sensor_msgs/Imu and nothing else, so it needs no generated types. Adding a
+       custom message later means adding the dependency then, not now. -->
+
+  <!-- No rosdep key exists for the Adafruit BNO085 stack: adafruit-blinka,
+       adafruit-circuitpython-bno08x and adafruit-extended-bus are pip-only and
+       are installed (pinned) in docker/pi/Dockerfile. The bno08x backend imports
+       them lazily, so the package builds, imports and tests without them -- only
+       imu_backend:=bno08x needs them present. -->
+
+  <test_depend>ament_copyright</test_depend>
+  <test_depend>ament_flake8</test_depend>
+  <test_depend>ament_pep257</test_depend>
+  <test_depend>python3-pytest</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

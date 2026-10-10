@@ -3,9 +3,11 @@
 # p4p Raspberry Pi image (linux/arm64)
 #   ROS 2 Jazzy (ros-base) + numpy/scipy (Kalman filter, unconstrained MPC gain)
 #   + osqp/qpsolvers (constrained MPC QP) + pyserial (Arduino Mega 2560 over
-#   /dev/ttyACM0, IMU packets + motor commands) + tf2 / tf_transformations + both
+#   /dev/ttyACM0, motor commands) + tf2 / tf_transformations + both
 #   WiFi-friendly RMWs (CycloneDDS, Zenoh). No ML dependencies of any kind.
 #   + OpenCV (p4p_camera's downscale and PNG encode).
+#   + the Adafruit BNO085 stack (p4p_imu, over /dev/i2c-1). The IMU used to hang
+#   off the Mega and arrive in its telemetry rows; it is on the Pi's I2C bus now.
 #   Camera stack is opt-in: --build-arg WITH_CAMERA=1 adds v4l-utils and
 #   Arducam's libcamera fork + picamera2 for the Pivariety OV2311.
 #
@@ -36,6 +38,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         sudo nano less usbutils iproute2 iputils-ping \
         python3-pip python3-numpy python3-scipy python3-serial python3-yaml \
         python3-opencv wget ca-certificates \
+        i2c-tools python3-smbus \
         ros-${ROS_DISTRO}-tf2-ros \
         ros-${ROS_DISTRO}-tf2-geometry-msgs \
         ros-${ROS_DISTRO}-tf-transformations \
@@ -56,8 +59,21 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/* \
     # QP solver for the constrained-MPC stage (prebuilt aarch64 wheel; numpy/scipy stay apt's)
     && python3 -m pip install osqp==1.1.3 qpsolvers==4.13.0 \
+    # The BNO085 stack for p4p_imu. pip rather than apt because none of it is
+    # packaged for Ubuntu, and PINNED because p4p_imu/backends/bno08x.py reads two
+    # private names off the driver (_process_available_packets, _readings) to keep
+    # its three sensor reports time-aligned. It probes for them and degrades to the
+    # public properties if they move, but a pin means an upstream rename cannot
+    # quietly halve the sample rate.
+    #
+    # Deliberately NOT uninstalling RPi.GPIO for rpi-lgpio, which is the usual
+    # Pi 5 Blinka advice: Blinka 9.2.0 does not depend on RPi.GPIO, and p4p_imu
+    # touches no GPIO at all -- ExtendedI2C goes through PureIO to /dev/i2c-N. If
+    # a future node needs real GPIO on a Pi 5, that swap becomes necessary.
+    && python3 -m pip install adafruit-blinka==9.2.0 \
+        adafruit-circuitpython-bno08x==1.3.3 adafruit-extended-bus==1.0.2 \
     && source /opt/ros/${ROS_DISTRO}/setup.bash \
-    && python3 -c "import rclpy, numpy, scipy, serial, yaml, cv2, tf_transformations, transforms3d, osqp, qpsolvers; print('pi deps OK numpy', numpy.__version__, 'scipy', scipy.__version__, 'pyserial', serial.__version__, 'cv2', cv2.__version__, 'osqp', osqp.__version__)"
+    && python3 -c "import rclpy, numpy, scipy, serial, yaml, cv2, tf_transformations, transforms3d, osqp, qpsolvers, adafruit_bno08x, adafruit_extended_bus; print('pi deps OK numpy', numpy.__version__, 'scipy', scipy.__version__, 'pyserial', serial.__version__, 'cv2', cv2.__version__, 'osqp', osqp.__version__, 'bno08x', adafruit_bno08x.__version__)"
 
 # ros2_numpy (msgify / numpify between numpy arrays and ROS messages), same recipe as
 # the GPU image. --no-deps: its metadata pins numpy==1.24.2 (no Python 3.12 wheel), and
@@ -124,11 +140,17 @@ RUN if [ "${WITH_CAMERA}" != "1" ]; then exit 0; fi; \
     rm -rf /var/lib/apt/lists/*; \
     exit 0
 
-# Non-root user matching the Pi's login uid/gid; dialout for the Arduino's tty.
+# Non-root user matching the Pi's login uid/gid; dialout for the Arduino's tty,
+# i2c for the BNO085. NOTE that the i2c group here is only half the story:
+# /dev/i2c-1's ownership comes from the HOST, so the container user needs the
+# host's numeric i2c gid, which compose.yaml supplies via group_add/${I2C_GID}.
+# This group exists so that an interactive `i2cdetect` works when the numbers
+# happen to line up, and because usermod cannot name a group that does not exist.
 RUN if id ubuntu >/dev/null 2>&1; then userdel -r ubuntu; fi \
+    && (getent group i2c >/dev/null || groupadd i2c) \
     && (getent group "${USER_GID}" >/dev/null || groupadd --gid "${USER_GID}" "${USERNAME}") \
     && useradd --uid "${USER_UID}" --gid "${USER_GID}" -m -s /bin/bash "${USERNAME}" \
-    && usermod -aG sudo,dialout,plugdev,video "${USERNAME}" \
+    && usermod -aG sudo,dialout,plugdev,video,i2c "${USERNAME}" \
     && echo "${USERNAME} ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/"${USERNAME}" \
     && chmod 0440 /etc/sudoers.d/"${USERNAME}" \
     && mkdir -p /workspace && chown "${USER_UID}:${USER_GID}" /workspace

@@ -7,8 +7,9 @@ Verifies ROS 2 (rclpy + the chosen RMW), numpy/scipy (Kalman filter maths), pyse
 (lists the serial ports the container can see -- the Arduino Mega 2560 shows up as
 /dev/ttyACM0 when passed through), yaml, cv2, and tf_transformations.
 
-The camera section is optional and skips cleanly when the Arducam stack is absent
-(WITH_CAMERA=0), so this script is useful on a board with no camera attached.
+The camera and IMU sections are optional and skip cleanly when the Arducam stack
+is absent (WITH_CAMERA=0) or no BNO085 is attached, so this script is useful on a
+bare board.
 """
 import os
 import platform
@@ -103,6 +104,64 @@ else:
             print("   into frames.pick_mode's test fixtures)")
         finally:
             cam.close()
+
+# BNO085 on I2C: optional, and the most common failure is permissions rather than
+# wiring, so report which of the three layers is missing instead of just "failed".
+try:
+    import adafruit_bno08x
+    from adafruit_extended_bus import ExtendedI2C
+except ImportError as e:
+    print(f"imu stack: not installed ({e}). p4p_imu's mock backend still works.")
+else:
+    import glob
+    buses = sorted(glob.glob("/dev/i2c-*"))
+    print(f"imu stack present: adafruit_bno08x {adafruit_bno08x.__version__}, "
+          f"buses visible: {buses or 'NONE'}")
+    if not buses:
+        print("  no /dev/i2c-*: the host needs dtparam=i2c_arm=on in")
+        print("  /boot/firmware/config.txt plus a reboot, and compose must pass the")
+        print("  device through. The `pi` service will not even start without it.")
+    for dev in buses:
+        bus_n = int(dev.rsplit("-", 1)[1])
+        i2c = None
+        try:
+            i2c = ExtendedI2C(bus_n)
+            # Bounded, not `while not try_lock()`: a smoke test must never hang.
+            for _ in range(100):
+                if i2c.try_lock():
+                    break
+            else:
+                print(f"  {dev}: bus stayed locked; is the IMU node running?")
+                continue
+            # NOTE: scan() probes with writes, so stop p4p_imu before running this.
+            found = set(i2c.scan())
+        except PermissionError as e:
+            print(f"  {dev}: permission denied ({e}). I2C_GID in .env does not match the")
+            print("    host's i2c group -- run `getent group i2c | cut -d: -f3` on the Pi.")
+            continue
+        except Exception as e:                      # noqa: BLE001 - a smoke test reports
+            print(f"  {dev}: could not scan: {e!r}")
+            continue
+        else:
+            addrs = ", ".join(hex(a) for a in found) or "nothing"
+            note = ""
+            if 0x4A in found:
+                note = "  <- BNO085 at 0x4a"
+            elif 0x4B in found:
+                note = "  <- BNO085 at 0x4b (ADR tied high); set i2c_address:=75"
+            print(f"  {dev}: {addrs}{note}")
+            if not found & {0x4A, 0x4B}:
+                print("    no BNO085 here. Check 5V->Vin, GND->GND, SDA->pin 3, SCL->pin 5.")
+        finally:
+            if i2c is not None:
+                try:
+                    i2c.unlock()
+                except Exception:                   # noqa: BLE001
+                    pass
+                try:
+                    i2c.deinit()
+                except Exception:                   # noqa: BLE001
+                    pass
 
 print("ALL OK")
 sys.exit(0)

@@ -36,6 +36,18 @@ services:
       - pi-home:/home/dev
     devices:                  # Docker will not start the container if this device is missing
       - ${ARDUINO_PORT:-/dev/ttyACM0}:/dev/ttyACM0
+      # The BNO085, for p4p_imu. In the MAIN service rather than a profile,
+      # because the IMU is not optional -- but the footgun above applies just as
+      # much: if I2C is not enabled on the host this device does not exist and
+      # THE CONTAINER WILL NOT START. `dtparam=i2c_arm=on` in
+      # /boot/firmware/config.txt plus a reboot comes first; see docker/README.md.
+      - ${I2C_DEV:-/dev/i2c-1}:/dev/i2c-1
+    group_add:
+      # The NUMERIC gid of the host's i2c group. /dev/i2c-1 is root:i2c 0660 and
+      # its ownership comes from the host, so the group NAME inside the image is
+      # irrelevant -- only a numeric match grants access. Read it off the Pi:
+      #   getent group i2c | cut -d: -f3
+      - "${I2C_GID:-994}"
     cap_add:
       - SYS_NICE              # SCHED_FIFO / nice for the fixed-rate filter loop
     ulimits:
