@@ -33,6 +33,9 @@ services:
       ROS_AUTOMATIC_DISCOVERY_RANGE: SUBNET
     volumes:
       - .:/workspace          # this repo; the shell env sources src/ros/install from here
+      # the docking controller (github.com/KaelinGraf/holonomic_mpc_ekf), built in the
+      # container with colcon; the shell env sources /controller_ws/install as an overlay
+      - ${CONTROLLER_WS:-../holonomic_mpc_ekf}:/controller_ws
       - pi-home:/home/dev
     devices:                  # Docker will not start the container if this device is missing
       - ${ARDUINO_PORT:-/dev/ttyACM0}:/dev/ttyACM0
