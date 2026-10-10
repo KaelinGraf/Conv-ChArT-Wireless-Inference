@@ -51,7 +51,7 @@ libcamera fork plus their picamera2**, which is what `p4p_camera` drives the Piv
 with. `camera_ros` is deliberately *not* installed: Arducam's packages replace the distro
 libcamera, and `camera_ros` is built against the distro ABI.
 
-Three things the image cannot do for you:
+Four things the image cannot do for you:
 
 1. **The kernel driver and overlay are the host's job.** `/boot/firmware/config.txt` needs
    `camera_auto_detect=0` and `dtoverlay=arducam-pivariety`, then a reboot. Never run the
@@ -81,6 +81,51 @@ Three things the image cannot do for you:
    `media-ctl` setup script, which needs no userspace libcamera at all; or run the camera node
    on the host, where Arducam's stack installs natively.
 
+4. **I2C for the BNO085 is the host's job too, and this one stops the container.**
+   `/boot/firmware/config.txt` needs the following, then a reboot:
+
+   ```
+   dtparam=i2c_arm=on
+   dtparam=i2c_arm_baudrate=400000     # Adafruit's figure for the BNO085
+   ```
+
+   Without the first line `/dev/i2c-1` does not exist, and because it is listed in the
+   **main** `pi` service's `devices` -- the IMU is not optional -- `docker compose up pi`
+   fails outright. That is the Arduino footgun again, deliberately accepted: unlike the
+   camera, I2C is one `dtparam` away on every Pi, so a profile would be more ceremony than
+   the problem is worth.
+
+   Then put the host's i2c group id in `.env`, because `/dev/i2c-1`'s ownership comes from
+   the host and compose matches on the **number**, not the name:
+
+   ```bash
+   getent group i2c | cut -d: -f3      # -> I2C_GID in .env
+   ```
+
+   `docker/host-setup-pi.sh` creates the group, adds you to it, and installs the udev rule
+   that Ubuntu arm64 omits. Verify, on the host and then inside the container:
+
+   ```bash
+   i2cdetect -y 1                      # expect 4a (0x4b if ADR is tied high)
+   ```
+
+   Stop the IMU node before running `i2cdetect`: it probes with writes. If reads fail with
+   `Permission denied: '/dev/i2c-1'`, `I2C_GID` is wrong.
+
+   The second `dtparam` is about reliability, not speed. The BNO085 violates the I2C spec
+   when it releases a clock stretch, and Pi 1-4 have a matching controller bug that makes
+   this chip notoriously painful on a Pi. The Pi 5's RP1 controller reportedly handles
+   stretching correctly, which is why the hardware bus is the default -- keep the kernel
+   current, since early Pi 5 kernels shipped I2C timing bugs. If it misbehaves anyway, the
+   fallback is software I2C on other pins:
+
+   ```
+   dtoverlay=i2c-gpio,bus=3,i2c_gpio_sda=23,i2c_gpio_scl=24   # GPIO23/24 = pins 16/18
+   ```
+
+   then rewire, set `I2C_DEV=/dev/i2c-3`, and run the node with `-p i2c_bus:=3`. See
+   `src/ros/src/p4p_imu/README.md`.
+
 Arducam also warn that a system `apt upgrade` silently replaces their libcamera with
 Raspberry Pi's, which breaks a working camera. The image `apt-mark hold`s it; don't run
 `apt upgrade` in a live container, rebuild instead.
@@ -93,7 +138,7 @@ docker compose exec pi bash -c "python3 docker/pi/smoke_test.py"
 docker compose exec pi bash             # ROS 2 sourced, this repo mounted at /workspace
 ```
 
-Inside the container, build the workspace once. The Pi needs four packages and **not**
+Inside the container, build the workspace once. The Pi needs five packages and **not**
 `convchart_ros`: that one is the laptop's inference node, and its `cv_bridge` dependency
 resolves to `libopencv-dev` plus some fifty further apt packages a camera has no use for.
 The only thing the two sides share is `convchart_qos`, which imports `rclpy` and nothing else.
@@ -103,15 +148,24 @@ cd /workspace/src/ros
 # Interfaces FIRST and alone: adding a .srv regenerates the interface library, and a stale
 # install/ surfaces later as an unhelpful "unknown type" at runtime.
 colcon build --symlink-install --packages-select convchart_interfaces
-colcon build --symlink-install --packages-select convchart_qos p4p_camera p4p_serial_bridge
+colcon build --symlink-install --packages-select convchart_qos p4p_camera p4p_serial_bridge p4p_imu
 ```
 
 Both machines must rebuild `convchart_interfaces` after a `.msg`/`.srv` change, and they must
 agree. To run the camera tests (they need no camera -- the `mock` backend stands in):
 
 ```bash
-colcon test --packages-select p4p_camera --event-handlers console_direct+
+colcon test --packages-select p4p_camera p4p_imu --event-handlers console_direct+
 colcon test-result --verbose
+```
+
+`p4p_imu` needs no sensor either -- its `mock` backend stands in, and its pure tier
+(`test_orientation.py`, `test_mock_backend.py`) runs with nothing but pytest:
+
+```bash
+PYTHONPATH=src/ros/src/p4p_imu python3 -m pytest \
+  src/ros/src/p4p_imu/test/test_orientation.py \
+  src/ros/src/p4p_imu/test/test_mock_backend.py
 ```
 
 Under QEMU on an x86 host, export `RMW_IMPLEMENTATION=rmw_fastrtps_cpp` first: CycloneDDS
