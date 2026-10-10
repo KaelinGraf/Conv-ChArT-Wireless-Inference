@@ -8,6 +8,8 @@ _p4p_ros="/opt/ros/${ROS_DISTRO:-jazzy}/setup.bash"
 
 [ -f /workspace/src/ros/install/setup.bash ] && source /workspace/src/ros/install/setup.bash
 
+[ -f /controller_ws/install/setup.bash ] && source /controller_ws/install/setup.bash
+
 if [ -z "${CYCLONEDDS_URI:-}" ] && [ -f /workspace/docker/ros/cyclonedds.xml ]; then
     export CYCLONEDDS_URI="file:///workspace/docker/ros/cyclonedds.xml"
 fi

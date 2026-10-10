@@ -2,7 +2,8 @@
 # =============================================================================
 # p4p Raspberry Pi image (linux/arm64)
 #   ROS 2 Jazzy (ros-base) + numpy/scipy (Kalman filter, unconstrained MPC gain)
-#   + osqp/qpsolvers (constrained MPC QP) + pyserial (Arduino Mega 2560 over
+#   + osqp/qpsolvers (constrained MPC QP) + daqp (the default MPC QP solver of
+#   holonomic_mpc_ekf) + pyserial (Arduino Mega 2560 over
 #   /dev/ttyACM0, IMU packets + motor commands) + tf2 / tf_transformations + both
 #   WiFi-friendly RMWs (CycloneDDS, Zenoh). No ML dependencies of any kind.
 #   + OpenCV (p4p_camera's v4l2 capture, downscale and PNG encode -- all the
@@ -49,6 +50,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && python3 -m pip install osqp==1.1.3 qpsolvers==4.13.0 \
     && source /opt/ros/${ROS_DISTRO}/setup.bash \
     && python3 -c "import rclpy, numpy, scipy, serial, yaml, cv2, tf_transformations, transforms3d, osqp, qpsolvers; print('pi deps OK numpy', numpy.__version__, 'scipy', scipy.__version__, 'pyserial', serial.__version__, 'cv2', cv2.__version__, 'osqp', osqp.__version__)"
+
+RUN python3 -m pip install daqp==0.10.3 \
+    && python3 -c "import numpy as np, daqp; \
+        x, _, flag, _ = daqp.solve(np.eye(2), np.array([1.0, -1.0]), np.eye(2), \
+                                   np.full(2, 0.5), np.full(2, -0.5)); \
+        assert flag == 1 and np.allclose(x, [-0.5, 0.5]), (flag, x); print('daqp OK', x)"
 
 RUN python3 -m pip install --no-deps ros2-numpy==0.0.5 \
     && d="$(python3 -m pip show ros2-numpy | sed -n 's/^Location: //p')/ros2_numpy" \

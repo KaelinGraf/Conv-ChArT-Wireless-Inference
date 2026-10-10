@@ -28,6 +28,7 @@ services:
       ROS_AUTOMATIC_DISCOVERY_RANGE: SUBNET
     volumes:
       - .:/workspace
+      - ${CONTROLLER_WS:-../holonomic_mpc_ekf}:/controller_ws
       - pi-home:/home/dev
     devices:
       - ${ARDUINO_PORT:-/dev/ttyACM0}:/dev/ttyACM0
