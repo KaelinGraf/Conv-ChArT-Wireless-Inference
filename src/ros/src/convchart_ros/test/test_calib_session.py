@@ -440,7 +440,8 @@ def test_submit_restores_views_under_their_own_indices():
     assert session.submit(views[1]) == 4, 'numbering carries on after a restored view'
     assert session.submit(views[2], index=7, dropped=True) == 7
     assert (session.kept_count, session.active_count, session.dropped_count) == (3, 2, 1)
-    assert session.solve().per_view_errors.keys() == {3, 4}, 'a restored dropped view stays out'
+    assert session.solve().per_view_errors.keys() == {3, 4, 7}, 'a restored dropped view is judged again'
+    assert session.dropped_count == 0
     assert session.submit(rejected(), index=9) is None and session.rejected_count == 1
     assert session.submit(views[3]) == 8, 'a rejected capture takes no index'
 
@@ -580,7 +581,29 @@ def test_outlier_view_is_dropped_and_the_solve_repeated():
     assert (session.kept_count, session.active_count, session.dropped_count) == (21, 20, 1)
     assert session.coverage().sum() == 16 * 20
     again = session.solve()
-    assert again.dropped == [] and again.n_views == 20
+    assert again.dropped == [bad] and again.n_views == 20
+
+
+def test_a_view_over_the_median_rule_but_under_the_floor_is_kept():
+    """
+    A view fitting to about 0.3 px among views at 0.05 px is kept: over 3x the median, under 1 px.
+
+    On the robot (2026-10-14) such views were the board tilted hard at the frame's edge.
+    """
+    views = synthetic_views(20, seed=8)
+    session = CalibrationSession(CalibrationSettings())
+    for view in views:
+        session.submit(view)
+    edge = session.submit(noisy(views[3], 0.3, seed=3))
+    solution = session.solve()
+    errors = solution.per_view_errors
+    assert errors[edge] > 3.0 * np.median(list(errors.values()))
+    assert solution.dropped == [] and session.dropped_count == 0
+    old_rule = CalibrationSession(CalibrationSettings(outlier_floor_px=0.0))
+    for view in views:
+        old_rule.submit(view)
+    edge_old = old_rule.submit(noisy(views[3], 0.3, seed=3))
+    assert old_rule.solve().dropped == [edge_old]
 
 
 def test_outliers_never_leave_fewer_than_min_views_active():
@@ -596,7 +619,7 @@ def test_outliers_never_leave_fewer_than_min_views_active():
     second = session.solve()
     errors = second.per_view_errors
     assert errors[mild] > 3.0 * np.median(list(errors.values()))
-    assert second.dropped == [] and second.n_views == 12
+    assert second.dropped == [severe] and second.n_views == 12
 
 
 def test_solve_warm_starts_from_the_previous_solution(monkeypatch):

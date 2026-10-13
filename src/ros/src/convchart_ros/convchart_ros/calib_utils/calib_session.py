@@ -29,7 +29,8 @@ CornerDetector = Callable[[np.ndarray], tuple[np.ndarray, np.ndarray]]
 REJECT_COLLINEAR = "corners in a line"
 _REJECT_TOO_FEW = "too few corners ({}/{})"
 
-_CFG_KEYS = {"board", "min_corners", "min_views", "review_s", "outlier_factor", "fix_k3",
+_CFG_KEYS = {"board", "min_corners", "min_views", "review_s", "outlier_factor", "outlier_floor_px",
+             "fix_k3",
              "coverage_grid", "converge_rel_sigma_f", "converge_sigma_c_px"}
 _STD_KEYS = ("fx", "fy", "cx", "cy", "k1", "k2", "p1", "p2", "k3")
 _VIEW_FILE = "frames/view_{:03d}.png"
@@ -43,17 +44,16 @@ class CalibrationSettings:
     physical ChArUco board. min_corners: fewest ChArUco corners a kept view needs; None means
     max(6, ceil(0.5 * inner corners)), see min_corners_resolved. min_views: active views needed
     before the first solve. review_s: seconds a capture's verdict stays on screen.
-    outlier_factor: a solve drops views whose reprojection error exceeds this times the median.
-    fix_k3: hold k3 at 0 instead of estimating it. coverage_grid: (rows, cols) of the coverage
-    map over the full frame. converge_rel_sigma_f: converged when sigma(fx)/fx and sigma(fy)/fy
-    are below this ... converge_sigma_c_px: ... and sigma(cx), sigma(cy) are below this
-    (full-res pixels).
+    outlier_factor: a solve drops views whose reprojection error exceeds this times the median
+    and outlier_floor_px. outlier_floor_px: the error a view must also exceed to be dropped
+    (full-resolution pixels).
     """
     board: BoardSpec = BoardSpec()
     min_corners: int | None = None
     min_views: int = 12
     review_s: float = 2.0
     outlier_factor: float = 3.0
+    outlier_floor_px: float = 1.0
     fix_k3: bool = False
     coverage_grid: tuple[int, int] = (6, 8)
     converge_rel_sigma_f: float = 0.002
@@ -86,6 +86,7 @@ def settings_from_cfg(cfg: dict[str, Any] | None) -> CalibrationSettings:
         min_views=int(values.get("min_views", default.min_views)),
         review_s=float(values.get("review_s", default.review_s)),
         outlier_factor=float(values.get("outlier_factor", default.outlier_factor)),
+        outlier_floor_px=float(values.get("outlier_floor_px", default.outlier_floor_px)),
         fix_k3=bool(values.get("fix_k3", default.fix_k3)),
         coverage_grid=grid,
         converge_rel_sigma_f=float(values.get("converge_rel_sigma_f",
@@ -291,7 +292,7 @@ class CalibrationSession:
         """Calibrate over the active views, then drop outlier views and solve again once."""
         settings = self._settings
         with self._lock:
-            active = [(v.index, v.obj_points, v.img_points) for v in self._views if not v.dropped]
+            active = [(v.index, v.obj_points, v.img_points) for v in self._views]
             if len(active) < settings.min_views:
                 raise RuntimeError(f"solve needs {settings.min_views} active views, "
                                    f"has {len(active)}")
@@ -305,7 +306,7 @@ class CalibrationSession:
             guess = (previous.K, previous.dist)
         rms, K, dist, std, errors = _calibrate(active, size, guess, flags)
         first_errors = errors
-        limit = settings.outlier_factor * float(np.median(errors))
+        limit = max(settings.outlier_factor * float(np.median(errors)), settings.outlier_floor_px)
         outliers = [int(i) for i in np.argsort(-errors, kind="stable") if errors[i] > limit]
         drop = set(outliers[:max(len(active) - settings.min_views, 0)])
         used = active
@@ -324,6 +325,8 @@ class CalibrationSession:
         )
         with self._lock:
             by_index = {v.index: v for v in self._views}
+            for view in self._views:
+                view.dropped = False
             for i in drop:
                 view = by_index.get(active[i][0])
                 if view is not None:

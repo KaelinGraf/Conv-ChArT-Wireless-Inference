@@ -1111,7 +1111,7 @@ def test_main_reports_a_mistyped_parameter_in_one_line(ros, tmp_path):
 
 
 def test_hud_counts_the_views_dropped_as_outliers(make_rig):
-    rig = make_rig({'min_views': 3, 'outlier_factor': 1.0})
+    rig = make_rig({'min_views': 3, 'outlier_factor': 1.0, 'outlier_floor_px': 0.0})
     node = rig.node
     for _ in range(4):
         capture(node)
