@@ -41,7 +41,7 @@ IMAGE_LEASE_CEILING_S = 1.0
 IMAGE_SUB_QOS = QoSProfile(
     history=QoSHistoryPolicy.KEEP_LAST,
     depth=1,
-    reliability=QoSReliabilityPolicy.RELIABLE,
+    reliability=QoSReliabilityPolicy.BEST_EFFORT,
     durability=QoSDurabilityPolicy.VOLATILE,
     deadline=Duration(seconds=IMAGE_DEADLINE_CEILING_S),
     lifespan=Duration(seconds=0.15),
@@ -73,7 +73,7 @@ def image_qos_pub(deadline_s: float = 0.15,
     return QoSProfile(
         history=QoSHistoryPolicy.KEEP_LAST,
         depth=1,
-        reliability=QoSReliabilityPolicy.RELIABLE,
+        reliability=QoSReliabilityPolicy.BEST_EFFORT,
         durability=QoSDurabilityPolicy.VOLATILE,
         deadline=Duration(seconds=deadline_s),
         lifespan=Duration(seconds=lifespan_s),
