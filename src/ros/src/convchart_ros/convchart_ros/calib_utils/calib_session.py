@@ -577,16 +577,42 @@ def write_camera_to_cfg(cfg_path: str | os.PathLike, K: np.ndarray, dist: np.nda
     K = np.asarray(K, dtype=np.float64)
     if K.shape != (3, 3):
         raise ValueError(f"K must be 3x3, got shape {K.shape}")
-    camera = cfg.get("CAMERA")
-    if not isinstance(camera, dict):
-        camera = {}
-    camera["K"] = _matrix_list(K)
-    camera["dist"] = [float(v) for v in np.ravel(dist)]
-    camera["image_size"] = _size_list(image_size)
-    cfg["CAMERA"] = camera
+    values = {"K": _matrix_list(K), "dist": [float(v) for v in np.ravel(dist)],
+              "image_size": _size_list(image_size)}
+    text = _camera_lines_replaced(original.decode("utf-8"), values)
+    if text is not None:
+        camera = (yaml.safe_load(text) or {}).get("CAMERA")
+        if not isinstance(camera, dict) or any(camera.get(k) != v for k, v in values.items()):
+            text = None
+    if text is None:
+        camera = cfg.get("CAMERA")
+        if not isinstance(camera, dict):
+            camera = {}
+        camera.update(values)
+        cfg["CAMERA"] = camera
+        text = _dump_yaml(cfg)
     if backup_path is not None and not Path(backup_path).exists():
         _atomic_write(Path(backup_path), original, mode_from=cfg_path)
-    _atomic_write(cfg_path, _dump_yaml(cfg).encode("utf-8"))
+    _atomic_write(cfg_path, text.encode("utf-8"))
+
+
+def _camera_lines_replaced(text: str, values: dict[str, Any]) -> str | None:
+    """Return text with the CAMERA block's one-line K, dist and image_size replaced by values."""
+    lines = text.splitlines(keepends=True)
+    start = next((i for i, line in enumerate(lines)
+                  if re.match(r"CAMERA:\s*(#.*)?$", line.rstrip("\r\n"))), None)
+    if start is None:
+        return None
+    end = next((i for i in range(start + 1, len(lines)) if lines[i].strip()
+                and not lines[i][0].isspace() and not lines[i].startswith("#")), len(lines))
+    found = set()
+    for i in range(start + 1, end):
+        body = lines[i].rstrip("\r\n")
+        match = re.match(r"(\s+)(K|dist|image_size):\s*\[.*\]\s*(#.*)?$", body)
+        if match and match.group(2) not in found:
+            found.add(match.group(2))
+            lines[i] = f"{match.group(1)}{match.group(2)}: {values[match.group(2)]}{lines[i][len(body):]}"
+    return "".join(lines) if found == set(values) else None
 
 
 def _to_gray(frame: np.ndarray) -> np.ndarray:

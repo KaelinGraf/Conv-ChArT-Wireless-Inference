@@ -802,6 +802,26 @@ def test_write_camera_to_cfg_keeps_other_keys_and_backs_up_once(tmp_path):
     assert sorted(p.name for p in tmp_path.rglob('*')) == ['backup', 'cfg.yaml', 'cfg.yaml.orig']
 
 
+def test_write_camera_to_cfg_keeps_the_comments_of_one_line_entries(tmp_path):
+    """Only the CAMERA lines change when K, dist and image_size are one-line lists, as in cfg.yaml."""
+    text = ('# top comment\nMODEL:\n  detector: d.onnx   # which one\n\n'
+            'CAMERA:\n  K: [[1.0, 0.0, 2.0], [0.0, 1.0, 3.0], [0.0, 0.0, 1.0]]   # old calibration\n'
+            '  dist: [0.0, 0.0, 0.0, 0.0, 0.0]\n  image_size: [640, 480]\n\n'
+            '# section comment\nCALIBRATION:\n  min_views: 12   # keep\n')
+    cfg_path = tmp_path / 'cfg.yaml'
+    cfg_path.write_text(text)
+    write_camera_to_cfg(cfg_path, K_TRUE, DIST_TRUE, FULL)
+    out = cfg_path.read_text()
+    written = yaml.safe_load(out)
+    assert written['CAMERA'] == {'K': K_TRUE.tolist(), 'dist': DIST_TRUE.tolist(),
+                                 'image_size': [1600, 1200]}
+    changed = [(a, b) for a, b in zip(text.splitlines(), out.splitlines()) if a != b]
+    assert len(out.splitlines()) == len(text.splitlines()) and len(changed) == 3
+    assert all(b.startswith('  ') and '#' not in b for _, b in changed)
+    for comment in ['# top comment', '# which one', '# section comment', '# keep']:
+        assert comment in out
+
+
 def test_write_camera_to_cfg_without_camera_block_or_backup(tmp_path):
     cfg_path = tmp_path / 'cfg.yaml'
     cfg_path.write_text('MODEL:\n  detector: d.onnx\nEXTRA: [1, 2]\n')
