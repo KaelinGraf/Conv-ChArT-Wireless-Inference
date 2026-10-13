@@ -5,6 +5,9 @@ Update 2026-10-10: the Pi camera node (`p4p_camera`) exists and serves full-reso
 `image_full_res` (`GetFullResImage`), so `calibrate` and `fake_camera` use that service; the original
 `capture` (`CaptureFrame`) service was never served by the Pi. `fake_camera` stands in for the Pi
 camera during development and in tests.
+Update 2026-10-14: the corners come from the deployed model by default (`detector` parameter, `model` or
+`opencv`), and with the model the live view shows the board's distance from the camera in large type, to
+set the lens focus by before calibrating. See "Corner detector" and "Distance readout".
 
 ## Goal
 
@@ -25,6 +28,8 @@ with every further capture, for as long as the user keeps going.
 | `auto_replace` | `True`: `K`, `dist`, `image_size` (at stream resolution) are written into the config's `CAMERA` block after every successful solve, after a one-time backup of the config. `False`: config untouched |
 | log file | always written, in both modes, after every solve and on exit |
 | coverage map | shown over the live view (toggle `M`) |
+| corner detector | the deployed model (`MODEL` block, via `inference.inference_pipeline`) by default; OpenCV's ChArUco detector with `detector:=opencv` |
+| distance readout | with the model: the board centre's z and range from the stream and the config's CAMERA, top right of the live view (toggle `D`) |
 | Pi camera node | `p4p_camera`; `fake_camera` implements the same `image` + `image_full_res` interface |
 
 ## Components
@@ -34,6 +39,7 @@ with every further capture, for as long as the user keeps going.
 | `convchart_interfaces/srv/GetFullResImage.srv` | interface | full-res still on request, shared with `p4p_camera` |
 | `convchart_ros/calib_utils/calib_board.py` | pure | `BoardSpec`, `board_spec_from_cfg`, `make_board` |
 | `convchart_ros/calib_utils/calib_session.py` | pure (no ROS, no GUI) | detection + usability, kept views, solve, coverage, intrinsics scaling, config + log writing |
+| `convchart_ros/calib_utils/calib_model.py` | no ROS, GPU | the model as corner detector (`corners`) and range finder (`board_range`); `check_model_board` |
 | `convchart_ros/calib_utils/calib_view.py` | pure (no ROS) | composes the window canvas: live / review modes, overlays, HUD, coverage map |
 | `convchart_ros/calib_utils/calib_synth.py` | pure | synthetic ChArUco renders from a known camera (fake camera + tests) |
 | `convchart_ros/calib_utils/fake_camera.py` | ROS node | serves `image` and `image_full_res` from synthetic renders |
@@ -160,7 +166,8 @@ class Solution:
     converged: bool
 
 class CalibrationSession:            # thread-safe; solve() works on a snapshot of the views
-    def __init__(self, settings: CalibrationSettings): ...
+    def __init__(self, settings: CalibrationSettings, detect: CornerDetector | None = None): ...
+        # detect: grey frame -> (corners (N, 2) pixel-centred, ids (N,) OpenCV ChArUco ids); None: OpenCV
     def evaluate(self, frame: np.ndarray) -> Detection            # detect + checks; does not record
     def submit(self, det: Detection) -> int | None                # kept -> view index; rejected -> counted, None
     def undo(self) -> int | None                                  # removes last kept view, returns its index
@@ -178,7 +185,8 @@ def write_log(path, log: dict) -> None                            # atomic YAML 
 def write_camera_to_cfg(cfg_path, K, dist, image_size, backup_path=None) -> None
 ```
 
-- Detection: `cv2.aruco.CharucoDetector(board).detectBoard(img)`; points from `board.matchImagePoints`.
+- Detection: `detect(gray)` when given (the model), else `cv2.aruco.CharucoDetector(board).detectBoard(img)`;
+  points from `board.matchImagePoints`.
   BGR input is converted to grey. Corners are moved into the pixel-centre convention by subtracting
   `charuco_offset_px()`: OpenCV 4.7-4.13 report ChArUco corners +0.5 px off pixel centres on both axes
   (removed upstream in 4.14 / 5.0, opencv#28380). The offset is measured once per process on an exactly
@@ -193,6 +201,49 @@ def write_camera_to_cfg(cfg_path, K, dist, image_size, backup_path=None) -> None
 - `write_camera_to_cfg`: load YAML, set `CAMERA.K` (3x3 nested floats), `CAMERA.dist`,
   `CAMERA.image_size`; keep all other keys and order; copy the original to `backup_path` first if given
   and not already present; write atomically.
+
+### `calib_model.py`
+
+```python
+MODEL_BOARD = BoardSpec()                                       # the only board the model knows, any square size
+def check_model_board(spec: BoardSpec) -> None                 # ValueError "... use detector:=opencv" otherwise
+@dataclass(frozen=True)
+class BoardRange: z: float; range: float                        # board centre, BOARD.square_length_m units
+class ModelDetector:                                            # one inference_pipeline, one call at a time
+    def __init__(self, cfg_path): ...                           # MODEL + BOARD of the config; RuntimeError if unloadable
+    def corners(self, frame) -> tuple[np.ndarray, np.ndarray]   # any resolution; sorted by id, each id once
+    def board_range(self, frame, K, dist) -> BoardRange | None  # the pipeline's pose; None without one
+```
+
+#### Corner detector
+
+- `inference_pipeline.run_inference` on the full-resolution still: the detector sees it downsized to its
+  640x480 input, the refiner places each corner at full resolution. Corners in the still's pixels,
+  pixel-centre convention (no offset, unlike OpenCV 4.7-4.13's detector).
+- The model's corner ids are OpenCV's ChArUco ids for the 5x5 `DICT_5X5_50` board (`canon_lattice`:
+  index i at ((i % 4) + 1, (i // 4) + 1) squares, the same row-major order as
+  `board.getChessboardCorners()`), so no mapping. Checked on renders against OpenCV's detector and the
+  projected truth (`test_calib_model.py`).
+- The pipeline undistorts the corners with K and dist before its lattice gate (RANSAC homography from
+  the ids' lattice positions; disagreeing corners lose their id) and its id recovery. Calibration must
+  not depend on the CAMERA block it replaces, and run without K the pipeline would use the config's
+  stream-resolution K on a full-resolution still. `corners()` therefore passes `dist = 0` (the
+  undistortion becomes the identity, whatever K) and a nominal K, and scales `lattice_tol_px` by
+  still width / detector input width (3 px -> 7.5 px at 1600 wide): the tolerance as tuned on the
+  detector's input, where the coarse positions it gates are quantised. On 48 synthetic stills
+  (fx 892, k1 0.05, k2 -0.10) this keeps 766/768 corners with no wrong id, the same as gating with the
+  true K/dist; a stale K/dist at the default tolerance kept 744.
+- `src/inference.py` is not changed: the tolerance is set on the pipeline instance's `PipelineConfig`
+  for the call and restored after it.
+
+#### Distance readout
+
+- A thread in `calibrate` runs `board_range` on the newest stream frame, at most every 0.1 s, with the
+  config's CAMERA K (scaled from `CAMERA.image_size` to the stream size when they differ) and dist, as
+  they were when the node started. The board centre is ((n + 1) / 2, (n + 1) / 2) squares from the
+  pose's origin; `z` is its depth, `range` its distance from the camera centre.
+- A reading stays up for 0.5 s after its frame; then "no board". Without `CAMERA.K` the readout says
+  "no CAMERA.K"; with `detector:=opencv` there is none.
 
 ### `calib_view.py` (pure)
 
@@ -209,6 +260,7 @@ class HudState:
     verdict_ok: bool | None = None
     message: str | None = None           # transient error, e.g. "capture timed out"
     help: str = "SPACE capture   U undo   M coverage   Q quit"
+    distance: tuple[float, float] | str | None = None   # live: (z, range) m drawn large, or "no board"
 
 def scale_points(points, src_size, dst_size) -> np.ndarray     # pixel-centre convention, per axis
 def compose_live(frame, hud: HudState, coverage=None, canvas_size=(640, 480), show_coverage=True) -> np.ndarray
@@ -223,6 +275,8 @@ def compose_review(frame_full, corners_full, kept: bool, hud: HudState, canvas_s
 - Coverage: the grid spans the frame uniformly; empty cells get only grid lines, covered cells a
   green fill whose opacity rises with the count (saturating at 3).
 - HUD: counters, coverage %, status, transient message (red), key help.
+- Distance readout (live only): a dark box at the top right under the top band, "z 0.80 m" in large white
+  type over "range 0.83 m"; a word ("no board") in large amber type instead; nothing when `None`.
 
 ### `calib_synth.py` and `fake_camera.py`
 
@@ -253,7 +307,8 @@ def blank_frame(size, seed=0) -> np.ndarray
 ```python
 class CalibrateCam(Node):
     def __init__(self, cfg_pth: str = "", auto_replace: bool = False, output_dir: str = "",
-                 capture_timeout_s: float = 5.0, capture_max_age_s: float = 0.5): ...
+                 capture_timeout_s: float = 5.0, capture_max_age_s: float = 0.5,
+                 detector: str = "model"): ...
     def request_capture(self) -> bool       # False while a request is in flight or a review is showing
     def undo(self) -> bool
     def state(self) -> GuiState             # snapshot for the GUI loop
@@ -263,7 +318,8 @@ def main(args=None) -> None
 ```
 
 - Constructor args are the defaults of the ROS parameters `config`, `auto_replace`, `output_dir`,
-  `capture_timeout_s`, `capture_max_age_s`; parameters win. Loads the config with `yaml.safe_load`. `main()` needs
+  `capture_timeout_s`, `capture_max_age_s`, `detector`; parameters win. `detector:=model` refuses a
+  board other than the model's and a config whose model does not load, naming `detector:=opencv`. Loads the config with `yaml.safe_load`. `main()` needs
   `-p config:=<cfg.yaml>`; a bad config or parameter ends it with one line, `calibrate: <reason>`.
 - Subscribes to `image` (callback group "video"); the `image_full_res` client uses callback group "calib".
 - Capture flow: `request_capture` -> `call_async`; on the response, decode the PNG, `evaluate`, `submit`,
@@ -293,7 +349,8 @@ def main(args=None) -> None
 - `SPACE`: capture (ignored while one is in flight or a review is showing). Review mode for `review_s`
   seconds: the captured frame scaled into the same canvas, corners drawn, verdict banner
   ("KEPT" / "REJECTED: reason"), counters updated.
-- `U` undo the last kept view, `M` toggle the coverage map, `Q`/`ESC`/closing the window: quit (final
+- `U` undo the last kept view, `M` toggle the coverage map, `D` toggle the distance readout,
+  `Q`/`ESC`/closing the window: quit (final
   log written). Keys are read with `waitKeyEx`, so arrow and page keys don't alias to commands.
 - Status line: `collecting n/min_views`, then `solving...`, then RMS with fx, fy, cx, cy and their
   standard deviations, and `converged` once the thresholds are met; `| N outliers dropped` once a solve
@@ -327,10 +384,11 @@ history: [{n_views, rms_px, fx, fy, cx, cy}]
 | `test/test_calib_board.py` | default board identical to dcc's; ids, rectangular boards, validation |
 | `test/test_calib_session.py` | evaluate (kept / no board / too few / collinear), submit/undo/counts, solve recovers a known K/dist from synthetic correspondences, uncertainty shrinks with views, outlier dropped, warm start, coverage, `scale_intrinsics` exact vs projection, settings defaults, config write keeps other keys + backup, log contents |
 | `test/test_calib_view.py` | canvas size constant across modes and input sizes, overlay pixels where `scale_points` says, `scale_points` exact, coverage fill, HUD drawn |
+| `test/test_calib_model.py` | model ids are OpenCV's ids and its corners pixel-centred and on the truth, calibration on its corners recovers K/dist, no board, `board_range` within 2 % from 0.19 to 1.5 m, other boards refused (GPU, checkpoints) |
 | `test/test_calib_synth.py` | detected corners on renders match the projected ground truth (< 0.3 px median), poses keep the board in frame |
 | `test/test_fake_camera.py` | stream at stream size, capture at full size, captures advance poses, `blank_every`, `reply_delay_s` |
 | `test/test_calibrate_pi_camera.py` | captures through the Pi's own camera node (mock backend): kept at full resolution, a frame older than `capture_max_age_s` refused |
-| `test/test_calibrate_node.py` | headless end to end with `fake_camera`: K/dist recovered, log written in both modes, `auto_replace` writes scaled `CAMERA` + backup and `False` leaves the config untouched, capture timeout handled without hanging, ROS parameters, a capture during a solve queues one more solve |
+| `test/test_calibrate_node.py` | headless end to end with `fake_camera`: K/dist recovered, log written in both modes, `auto_replace` writes scaled `CAMERA` + backup and `False` leaves the config untouched, capture timeout handled without hanging, ROS parameters, a capture during a solve queues one more solve; with the model (GPU, checkpoints): the distance readout matches the fake camera's pose and K is recovered; OpenCV shows no readout |
 | `test/test_gitignore.py` | `calibration_output/` stays out of git |
 
 ROS tests use an isolated domain and localhost-only discovery, like `test_node_pose_output.py`.
@@ -341,4 +399,5 @@ Manual check (fake camera, needs the X display): window size stable across modes
 # inside p4p-gpu
 ros2 run convchart_ros fake_camera
 ros2 run convchart_ros calibrate --ros-args -p config:=/workspace/Conv-ChArT-Wireless-Inference/cfg/cfg.yaml
+# or: ros2 launch convchart_ros convchart.launch.py task:=calibrate [source:=fake] [detector:=opencv]
 ```
