@@ -65,7 +65,8 @@ ARGUMENTS = {
     "auto_deploy": ("false", "finetune: switch the fine-tune node's own teacher to accepted models"),
     "max_rate": ("7.5", "finetune on the Pi: label at most this many frames per second, 0 for every frame"),
     "resume": ("", "finetune: carry on in an ssl_output session folder (or latest): its stored frames, rounds and "
-                   "best model, which relabels everything stored"),
+                   "best model, which relabels everything stored; calibrate: carry on in a calibration_output session "
+                   "folder (or latest): its kept views are detected again and solved, and new captures add to them"),
     "base_detector": ("", "finetune: the weights every round trains from; default the release "
                           "checkpoints/detector_882k.onnx"),
 }
@@ -229,13 +230,21 @@ def plan(args: dict, repo: Path | None, env=None) -> Plan:
         detector = a["detector"].strip().lower()
         if detector not in ("model", "opencv"):
             raise PlanError(f"detector:= must be model or opencv, got {a['detector']!r}")
+        resume = a["resume"].strip()
+        if resume and resume != "latest":
+            resume = str(_path(resume))
+            if not (Path(resume) / "frames").is_dir():
+                raise PlanError(f"resume:= {resume} is not a calibration session folder (no frames/)")
         nodes.append(NodeSpec("calibrate", {"config": str(config), "auto_replace": auto_replace,
-                                            "output_dir": a["output_dir"].strip(), "detector": detector}, True))
+                                            "output_dir": a["output_dir"].strip(), "detector": detector,
+                                            "resume": resume}, True))
         notes.append("task: the calibration window (SPACE capture, U undo, M coverage"
                      + (", D distance" if detector == "model" else "") + ", Q quit); stills come from "
                      f"{shown.rstrip('/')}/image_full_res, corners from "
                      + ("the model" if detector == "model" else "OpenCV")
                      + (", written into the config" if auto_replace else ""))
+        if resume:
+            notes.append(f"resuming {'the latest calibration session' if resume == 'latest' else resume}")
     elif task == "demo":
         nodes.append(pose_view(True, headless))
         notes.append("task: the pose overlay" + (f", recorded to {record}" if record else "")

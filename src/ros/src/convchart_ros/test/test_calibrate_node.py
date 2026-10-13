@@ -67,7 +67,8 @@ CAMERA:
 
 LOG_KEYS = {'session', 'board', 'images', 'counts', 'coverage_fraction', 'solution', 'views',
             'history'}
-SESSION_KEYS = {'started', 'config', 'auto_replace', 'config_written', 'config_backup'}
+SESSION_KEYS = {'started', 'config', 'auto_replace', 'config_written', 'config_backup',
+                'detector', 'resumed'}
 BOARD_KEYS = {'squares', 'square_length_m', 'marker_length_m', 'dictionary', 'first_marker_id',
               'legacy_pattern'}
 SOLUTION_KEYS = {'rms_px', 'converged', 'K_full', 'dist', 'std', 'K_stream', 'stream_size'}
@@ -425,6 +426,79 @@ def test_opencv_shows_no_distance_readout(make_rig):
     assert state.hud.distance is None and 'distance' not in state.hud.help
 
 
+def test_resume_carries_on_a_session_where_it_was_left(ros, tmp_path):
+    calibration = {'review_s': 0.05, 'outlier_factor': 100.0}
+    rig = start_rig(tmp_path, calibration, {'blank_every': 6})
+    try:
+        wait_for_stream(rig.node)
+        for _ in range(15):
+            capture(rig.node)
+        wait_until(lambda: settled(rig.node), 'the solves')
+        assert rig.node.undo()
+        wait_until(lambda: settled(rig.node), 'the solve after undo')
+        first = rig.node.state()
+        folder = rig.node.session_dir
+        rig.node.close()
+    finally:
+        rig.close()
+    assert (first.hud.kept, first.hud.rejected) == (12, 2)
+    first_log = read_log(folder)
+    frames = folder / 'frames'
+    assert (frames / 'undone_012.png').exists() and not (frames / 'view_012.png').exists()
+
+    rig = start_rig(tmp_path, calibration, resume='latest')
+    try:
+        node = rig.node
+        assert node.session_dir == folder, 'no new session folder'
+        wait_until(lambda: settled(node) and node.state().solution is not None, 'the first solve')
+        state = node.state()
+        assert (state.hud.kept, state.hud.rejected) == (12, 2)
+        assert f'resumed {folder.name}: 12 views' in state.hud.status
+        solution, earlier = state.solution, first_log['solution']
+        np.testing.assert_allclose(solution.K, earlier['K_full'], rtol=1e-4)
+        assert solution.rms == pytest.approx(earlier['rms_px'], rel=1e-4)
+        assert state.hud.coverage_fraction == pytest.approx(first_log['coverage_fraction'])
+        wait_for_stream(node)
+        capture(node)
+        assert (frames / 'view_013.png').exists()
+        wait_until(lambda: settled(node), 'the solve with the new view')
+        assert node.undo(), 'the new view'
+        wait_until(lambda: settled(node), 'the solve after undo')
+        assert node.undo(), 'a restored view'
+        assert (frames / 'undone_013.png').exists() and (frames / 'undone_011.png').exists()
+        wait_until(lambda: settled(node), 'the last review')
+        node.close()
+    finally:
+        rig.close()
+    log = read_log(folder)
+    assert [view['index'] for view in log['views']] == list(range(11))
+    assert log['counts']['kept'] == 11 and log['counts']['rejected'] == 2
+    assert log['session']['started'] == first_log['session']['started']
+    [resumed] = log['session']['resumed']
+    assert resumed['detector'] == 'opencv'
+    assert (resumed['views_restored'], resumed['views_now_rejected']) == (12, 0)
+    assert log['history'][:len(first_log['history'])] == first_log['history']
+    assert len(log['history']) == len(first_log['history']) + 3
+
+
+def test_resume_refuses_a_session_of_another_board_or_no_session(ros, tmp_path):
+    folder = tmp_path / 'out' / '20261013-225444'
+    (folder / 'frames').mkdir(parents=True)
+    (folder / 'calibration_log.yaml').write_text(yaml.safe_dump({'board': {
+        'squares': [7, 5], 'square_length_m': 0.03, 'marker_length_m': 0.022,
+        'dictionary': 'DICT_4X4_50', 'first_marker_id': 10, 'legacy_pattern': False}}))
+    config = write_config(tmp_path / 'cfg' / 'cfg.yaml', {})
+    cases = [(str(folder), 'was taken with a 7x5 DICT_4X4_50 board'),
+             (str(tmp_path), 'is not a calibration session folder'),
+             ('latest', 'no session folder in')]
+    for resume, match in cases:
+        with pytest.raises(ValueError, match=match):
+            CalibrateCam(cfg_pth=str(config), output_dir=str(tmp_path / 'out'),
+                         detector='opencv', resume=resume)
+    assert sorted(p.name for p in (tmp_path / 'out').iterdir()) == [folder.name], \
+        'no new session folder'
+
+
 def test_calibration_recovers_the_fake_camera(run):
     solution = run.state.solution
     assert solution is not None
@@ -462,6 +536,7 @@ def test_log_has_the_spec_keys_and_values(run):
     assert set(log['session']) == SESSION_KEYS
     assert log['session']['config'] == str(run.config)
     assert log['session']['auto_replace'] is run.auto_replace
+    assert log['session']['detector'] == 'opencv' and log['session']['resumed'] == []
     assert set(log['board']) == BOARD_KEYS
     spec = board_spec_from_cfg(run.board)
     assert log['board']['squares'] == list(spec.squares)

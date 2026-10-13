@@ -8,6 +8,8 @@ camera during development and in tests.
 Update 2026-10-14: the corners come from the deployed model by default (`detector` parameter, `model` or
 `opencv`), and with the model the live view shows the board's distance from the camera in large type, to
 set the lens focus by before calibrating. See "Corner detector" and "Distance readout".
+Update 2026-10-14: `resume` carries on in an earlier session's folder, so views can be added until the
+solve converges. See "Resume".
 
 ## Goal
 
@@ -30,6 +32,7 @@ with every further capture, for as long as the user keeps going.
 | coverage map | shown over the live view (toggle `M`) |
 | corner detector | the deployed model (`MODEL` block, via `inference.inference_pipeline`) by default; OpenCV's ChArUco detector with `detector:=opencv` |
 | distance readout | with the model: the board centre's z and range from the stream and the config's CAMERA, top right of the live view (toggle `D`) |
+| resume | `resume:=<session folder>|latest` re-detects that session's kept views from their frames, solves at once and adds new captures to the same folder |
 | Pi camera node | `p4p_camera`; `fake_camera` implements the same `image` + `image_full_res` interface |
 
 ## Components
@@ -170,6 +173,8 @@ class CalibrationSession:            # thread-safe; solve() works on a snapshot 
         # detect: grey frame -> (corners (N, 2) pixel-centred, ids (N,) OpenCV ChArUco ids); None: OpenCV
     def evaluate(self, frame: np.ndarray) -> Detection            # detect + checks; does not record
     def submit(self, det: Detection) -> int | None                # kept -> view index; rejected -> counted, None
+    def submit(self, det, index=None, dropped=False) -> int | None  # index/dropped: a view restored on resume
+    def carry_over(self, rejected=0, next_index=0, history=None)  # an earlier session's counts and solves
     def undo(self) -> int | None                                  # removes last kept view, returns its index
     kept_count, rejected_count, active_count, dropped_count       # properties
     ready: bool                                                   # active_count >= min_views
@@ -178,6 +183,11 @@ class CalibrationSession:            # thread-safe; solve() works on a snapshot 
     history: list[dict]                                           # {n_views, rms, fx, fy, cx, cy} per solve
     def coverage(self) -> np.ndarray                              # (rows, cols) int: kept corners per cell
     def coverage_fraction(self) -> float                          # cells with >= 1 corner / all cells
+
+@dataclass(frozen=True)
+class SavedSession: folder; views: [(index, file, dropped)]; rejected: int; next_index: int; log: dict | None
+def read_saved_session(folder) -> SavedSession                  # ValueError without frames/ or with a bad log
+def latest_saved_session(root) -> Path | None                   # newest folder (by name) holding a kept view
 
 def scale_intrinsics(K, full_size, target_size) -> np.ndarray    # uniform scale only (ValueError otherwise)
 def build_log(session, settings, meta: dict) -> dict             # log document, see "Log file"
@@ -308,7 +318,7 @@ def blank_frame(size, seed=0) -> np.ndarray
 class CalibrateCam(Node):
     def __init__(self, cfg_pth: str = "", auto_replace: bool = False, output_dir: str = "",
                  capture_timeout_s: float = 5.0, capture_max_age_s: float = 0.5,
-                 detector: str = "model"): ...
+                 detector: str = "model", resume: str = ""): ...
     def request_capture(self) -> bool       # False while a request is in flight or a review is showing
     def undo(self) -> bool
     def state(self) -> GuiState             # snapshot for the GUI loop
@@ -318,7 +328,7 @@ def main(args=None) -> None
 ```
 
 - Constructor args are the defaults of the ROS parameters `config`, `auto_replace`, `output_dir`,
-  `capture_timeout_s`, `capture_max_age_s`, `detector`; parameters win. `detector:=model` refuses a
+  `capture_timeout_s`, `capture_max_age_s`, `detector`, `resume`; parameters win. `detector:=model` refuses a
   board other than the model's and a config whose model does not load, naming `detector:=opencv`. Loads the config with `yaml.safe_load`. `main()` needs
   `-p config:=<cfg.yaml>`; a bad config or parameter ends it with one line, `calibrate: <reason>`.
 - Subscribes to `image` (callback group "video"); the `image_full_res` client uses callback group "calib".
@@ -331,6 +341,31 @@ def main(args=None) -> None
   frame has been seen).
 - `undo` removes the last kept view, renames its file to `undone_NNN.png`, and queues a re-solve if
   still `ready`.
+
+### Resume
+
+`resume` names an earlier session folder, or `latest`: the newest folder under `output_dir` (by name,
+which is its start time) holding a `frames/view_NNN.png`. No new folder is made; the session carries on
+in that one.
+
+- The frames are the record of the views: `view_NNN.png` are the kept views (undo renamed the others to
+  `undone_NNN.png`), `rejected_NNN.png` the rejected captures. The log adds which views a solve
+  dropped, the start time, `config_written`, earlier resumes and the solve history.
+- Each kept view's frame goes through `evaluate` and `submit` with the configured detector, in index
+  order, under its own index; views a solve dropped stay dropped. A view the detector now rejects (or
+  whose frame cannot be read) counts as rejected and is left out of the views and the log; its file
+  keeps its name, so a later resume tries it again. Rejected captures are not detected again: they
+  stay rejected.
+- The rejected captures, the solve history and the indices used carry over: new views are numbered
+  above every `view_`, `undone_` and logged index, and rejected files go on from the last number.
+- A solve starts at once when `min_views` views are active, so status, coverage and convergence come
+  back as they were (the status line says `resumed <folder>: N views` for 6 s); otherwise the log is
+  rewritten at once.
+- A log naming a board of another layout than `CALIBRATION.board` is refused (`ValueError`).
+- The log keeps the first `started`, and `session.resumed` gets
+  `{at, detector, views_restored, views_now_rejected}` per resume. `session.detector` is the detector
+  of the latest run. `auto_replace`, undo (restored views included) and the backup work as before; the
+  backup is made once per folder.
 
 ## Threading model
 
@@ -364,7 +399,7 @@ Session folder: `<output_dir>/<YYYYmmdd-HHMMSS>/`, where `output_dir` defaults t
 `auto_replace`, the config backup. Folder names use the container's clock, which is UTC in p4p-gpu.
 
 ```yaml
-session: {started, config, auto_replace, config_written, config_backup}
+session: {started, config, auto_replace, config_written, config_backup, detector, resumed: []}
 board: {squares, square_length_m, marker_length_m, dictionary, first_marker_id, legacy_pattern}
 images: {full_size: [W, H], stream_size: [W, H] | null}
 counts: {kept, rejected, dropped, active}
@@ -388,7 +423,7 @@ history: [{n_views, rms_px, fx, fy, cx, cy}]
 | `test/test_calib_synth.py` | detected corners on renders match the projected ground truth (< 0.3 px median), poses keep the board in frame |
 | `test/test_fake_camera.py` | stream at stream size, capture at full size, captures advance poses, `blank_every`, `reply_delay_s` |
 | `test/test_calibrate_pi_camera.py` | captures through the Pi's own camera node (mock backend): kept at full resolution, a frame older than `capture_max_age_s` refused |
-| `test/test_calibrate_node.py` | headless end to end with `fake_camera`: K/dist recovered, log written in both modes, `auto_replace` writes scaled `CAMERA` + backup and `False` leaves the config untouched, capture timeout handled without hanging, ROS parameters, a capture during a solve queues one more solve; with the model (GPU, checkpoints): the distance readout matches the fake camera's pose and K is recovered; OpenCV shows no readout |
+| `test/test_calibrate_node.py` | headless end to end with `fake_camera`: K/dist recovered, log written in both modes, `auto_replace` writes scaled `CAMERA` + backup and `False` leaves the config untouched, capture timeout handled without hanging, ROS parameters, a capture during a solve queues one more solve; with the model (GPU, checkpoints): the distance readout matches the fake camera's pose and K is recovered; OpenCV shows no readout; resume restores views, counts, solution and history, numbers new views after undone ones, undoes restored views, and refuses another board's session |
 | `test/test_gitignore.py` | `calibration_output/` stays out of git |
 
 ROS tests use an isolated domain and localhost-only discovery, like `test_node_pose_output.py`.
@@ -400,4 +435,5 @@ Manual check (fake camera, needs the X display): window size stable across modes
 ros2 run convchart_ros fake_camera
 ros2 run convchart_ros calibrate --ros-args -p config:=/workspace/Conv-ChArT-Wireless-Inference/cfg/cfg.yaml
 # or: ros2 launch convchart_ros convchart.launch.py task:=calibrate [source:=fake] [detector:=opencv]
+#     [resume:=latest|<session folder>]
 ```

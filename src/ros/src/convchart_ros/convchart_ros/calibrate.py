@@ -15,8 +15,11 @@ through the inference pipeline, calib_model) or from OpenCV's ChArUco detector (
 With the model, the live view also shows the board's distance from the camera in large type, from
 the stream and the config's current CAMERA K and dist, to set the lens focus by before calibrating.
 
+resume carries on in an earlier session's folder (or the latest one): its kept views are
+re-detected from their saved frames and solved at once, and new captures add to them.
+
     ros2 run convchart_ros calibrate --ros-args -p config:=<cfg.yaml> [-p auto_replace:=true]
-        [-p detector:=opencv]
+        [-p detector:=opencv] [-p resume:=<session folder>|latest]
 """
 from __future__ import annotations
 
@@ -44,10 +47,10 @@ from rclpy.task import Future
 from sensor_msgs.msg import CompressedImage
 import yaml
 
-from .calib_utils.calib_board import make_board
+from .calib_utils.calib_board import BoardSpec, make_board
 from .calib_utils.calib_session import (
-    build_log, CalibrationSession, Detection, scale_intrinsics, settings_from_cfg, Solution,
-    write_camera_to_cfg, write_log)
+    build_log, CalibrationSession, Detection, latest_saved_session, read_saved_session,
+    SavedSession, scale_intrinsics, settings_from_cfg, Solution, write_camera_to_cfg, write_log)
 from .calib_utils.calib_view import compose_live, compose_review, HudState
 from .screen import fill_scale, screen_size
 
@@ -65,6 +68,8 @@ _GUI_WAIT_MS = 30
 _RANGE_PERIOD_S = 0.1
 _RANGE_HOLD_S = 0.5
 _HELP_DISTANCE = "SPACE capture   U undo   M coverage   D distance   Q quit"
+_NOTICE_S = 6.0
+_HISTORY_KEYS = {"n_views", "rms_px", "fx", "fy", "cx", "cy"}
 _QUIT_KEYS = (ord("q"), ord("Q"), 27)
 _PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 
@@ -116,7 +121,7 @@ class CalibrateCam(Node):
 
     def __init__(self, cfg_pth: str = "", auto_replace: bool = False, output_dir: str = "",
                  capture_timeout_s: float = 5.0, capture_max_age_s: float = 0.5,
-                 detector: str = DETECTORS[0]):
+                 detector: str = DETECTORS[0], resume: str = ""):
         super().__init__("calibrate_cam_node")
         try:
             self._cfg_pth: str = str(self.declare_parameter("config", str(cfg_pth)).value)
@@ -137,6 +142,7 @@ class CalibrateCam(Node):
             if self._detector not in DETECTORS:
                 raise ValueError(f"detector must be one of {', '.join(DETECTORS)}, "
                                  f"got {self._detector!r}")
+            resume = str(self.declare_parameter("resume", str(resume)).value).strip()
             if not self._cfg_pth:
                 raise ValueError("configuration path is not set (-p config:=<cfg.yaml>)")
             self._config_path = Path(os.path.abspath(self._cfg_pth))
@@ -157,12 +163,31 @@ class CalibrateCam(Node):
             started = datetime.now().astimezone()
             root = (Path(os.path.abspath(output_dir)) if output_dir
                     else self._config_path.parent.parent / "calibration_output")
-            self._session_dir = _new_session_dir(root, started)
+            saved = None
+            if not resume:
+                self._session_dir = _new_session_dir(root, started)
+            else:
+                folder = (latest_saved_session(root) if resume == "latest"
+                          else Path(os.path.abspath(resume)))
+                if folder is None:
+                    raise ValueError(f"resume:=latest: no session folder in {root} holds a kept "
+                                     f"view")
+                saved = read_saved_session(folder)
+                _check_saved_board(saved, self._settings.board)
+                self._session_dir = saved.folder
+                view_files, now_rejected = self._restore(saved)
         except Exception as error:
             self.get_logger().error(str(error))
             self.destroy_node()
             raise
-        self._started = started.isoformat(timespec="seconds")
+        earlier = (saved.log or {}).get("session") or {} if saved is not None else {}
+        self._started = (str(earlier["started"]) if earlier.get("started")
+                         else started.isoformat(timespec="seconds"))
+        self._resumed: list[dict] = [dict(entry) for entry in earlier.get("resumed") or []]
+        if saved is not None:
+            self._resumed.append({"at": started.isoformat(timespec="seconds"),
+                                  "detector": self._detector, "views_restored": len(view_files),
+                                  "views_now_rejected": now_rejected})
         self._log_path = self._session_dir / LOG_NAME
         self._backup_path = self._session_dir / f"{self._config_path.name}.bak"
 
@@ -179,10 +204,12 @@ class CalibrateCam(Node):
         self._solving = False
         self._closing = False
         self._closed = False
-        self._config_written = False
-        self._view_files: dict[int, str] = {}
+        self._config_written = bool(earlier.get("config_written", False))
+        self._view_files: dict[int, str] = {} if saved is None else view_files
         self._views_lock = threading.Lock()
-        self._n_rejected_files = 0
+        self._n_rejected_files = 0 if saved is None else saved.rejected
+        self._notice: str | None = None
+        self._notice_until = 0.0
         self._range = None
         self._range_time = 0.0
         self._range_stop = threading.Event()
@@ -215,6 +242,21 @@ class CalibrateCam(Node):
             f"{'on: ' + str(self._config_path) if self._auto_replace else 'off'}")
         if self._model is not None and self._camera is None:
             self.get_logger().warning("the config has no CAMERA.K, so the distance readout is off")
+        if saved is not None:
+            restored = len(view_files)
+            self._notice = (f"resumed {self._session_dir.name}: {restored} views"
+                            + (f", {now_rejected} now rejected" if now_rejected else ""))
+            self._notice_until = time.monotonic() + _NOTICE_S
+            self.get_logger().info(
+                f"resumed {self._session_dir}: {restored} views restored"
+                + (f" ({now_rejected} more now rejected)" if now_rejected else "")
+                + f", {saved.rejected} rejected captures; new views from "
+                f"{FRAMES_DIR}/view_{max(saved.next_index, max(view_files, default=-1) + 1):03d}"
+                f".png")
+            if self._session.ready:
+                self._queue_solve()
+            else:
+                self._write_log()
 
     @property
     def session_dir(self) -> Path:
@@ -285,6 +327,8 @@ class CalibrateCam(Node):
             status += f" | {dropped} outlier{'' if dropped == 1 else 's'} dropped"
         if capturing:
             status += " | capturing..."
+        if self._notice is not None and now < self._notice_until:
+            status += f" | {self._notice}"
         if message is None and frame is None:
             message = "waiting for the image stream"
         elif message is None and now - frame_time > _STALL_S:
@@ -437,6 +481,29 @@ class CalibrateCam(Node):
                 with self._cond:
                     self._solving = False
 
+    def _restore(self, saved: SavedSession) -> tuple[dict[int, str], int]:
+        """Re-detect an earlier session's kept views and submit them under their own indices."""
+        view_files: dict[int, str] = {}
+        now_rejected = unreadable = 0
+        for index, name, dropped in saved.views:
+            frame = cv2.imread(str(saved.folder / name), cv2.IMREAD_GRAYSCALE)
+            if frame is None:
+                self.get_logger().warning(f"resume: cannot read {name}; counted as rejected")
+                now_rejected += 1
+                unreadable += 1
+                continue
+            detection = self._session.evaluate(frame)
+            if self._session.submit(detection, index=index, dropped=dropped) is None:
+                self.get_logger().warning(f"resume: {name} is now rejected: {detection.reason}")
+                now_rejected += 1
+            else:
+                view_files[index] = name
+        history = [entry for entry in (saved.log or {}).get("history") or []
+                   if isinstance(entry, dict) and _HISTORY_KEYS <= set(entry)]
+        self._session.carry_over(rejected=saved.rejected + unreadable,
+                                 next_index=saved.next_index, history=history)
+        return view_files, now_rejected
+
     def _range_worker(self) -> None:
         """Measure the board's distance on each new stream frame, at most every _RANGE_PERIOD_S."""
         measured = None
@@ -517,7 +584,8 @@ class CalibrateCam(Node):
         with self._lock:
             meta = {"started": self._started, "config": str(self._config_path),
                     "auto_replace": self._auto_replace, "config_written": self._config_written,
-                    "config_backup": backup, "stream_size": self._stream_size,
+                    "config_backup": backup, "detector": self._detector,
+                    "resumed": list(self._resumed), "stream_size": self._stream_size,
                     "view_files": dict(self._view_files)}
         try:
             write_log(self._log_path, build_log(self._session, self._settings, meta))
@@ -660,6 +728,27 @@ def _camera_from_cfg(cfg: dict) -> tuple[np.ndarray, np.ndarray, tuple[int, int]
     dist = np.asarray(camera.get("dist") or [0.0] * 5, dtype=np.float64).ravel()
     size = camera.get("image_size")
     return K, dist, None if size is None else (int(size[0]), int(size[1]))
+
+
+def _check_saved_board(saved: SavedSession, spec: BoardSpec) -> None:
+    """Raise ValueError when the saved session's log names a board other than spec's layout."""
+    board = (saved.log or {}).get("board")
+    if not isinstance(board, dict):
+        return
+    try:
+        theirs = (tuple(int(v) for v in board["squares"]), str(board["dictionary"]),
+                  int(board["first_marker_id"]), bool(board["legacy_pattern"]),
+                  round(float(board["marker_length_m"]) / float(board["square_length_m"]), 6))
+    except (KeyError, TypeError, ValueError, ZeroDivisionError):
+        raise ValueError(f"resume: the board block of {saved.folder / LOG_NAME} is "
+                         f"malformed") from None
+    ours = (tuple(spec.squares), spec.dictionary, spec.first_marker_id, spec.legacy_pattern,
+            round(spec.marker_side / spec.square_length, 6))
+    if theirs != ours:
+        raise ValueError(f"resume: {saved.folder} was taken with a {theirs[0][0]}x{theirs[0][1]} "
+                         f"{theirs[1]} board (markers from {theirs[2]}), but CALIBRATION.board "
+                         f"is a {ours[0][0]}x{ours[0][1]} {ours[1]} board (markers from "
+                         f"{ours[2]})")
 
 
 def _spin(executor: MultiThreadedExecutor, stop: threading.Event) -> None:

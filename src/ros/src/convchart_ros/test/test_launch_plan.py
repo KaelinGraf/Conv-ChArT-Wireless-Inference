@@ -211,6 +211,17 @@ def test_calibrate_finds_corners_with_the_model_unless_told_opencv(repo):
     assert p.nodes[0].parameters["detector"] == "opencv" and any("corners from OpenCV" in n for n in p.notes)
 
 
+def test_calibrate_resumes_a_session_folder_or_the_latest(repo):
+    assert run(repo, task="calibrate").nodes[0].parameters["resume"] == ""
+    p = run(repo, task="calibrate", resume="latest")
+    assert p.nodes[0].parameters["resume"] == "latest" and any("resuming" in n for n in p.notes)
+    session = repo / "calibration_output" / "20261013-225444"
+    (session / "frames").mkdir(parents=True)
+    assert run(repo, task="calibrate", resume=str(session)).nodes[0].parameters["resume"] == str(session)
+    with pytest.raises(PlanError, match="is not a calibration session folder"):
+        run(repo, task="calibrate", resume=str(repo / "calibration_output"))
+
+
 def test_window_tasks_need_a_display_and_headless_recording_does_not(repo):
     with pytest.raises(PlanError, match="calibrate opens a window but DISPLAY is not set"):
         run(repo, env={}, task="calibrate")
