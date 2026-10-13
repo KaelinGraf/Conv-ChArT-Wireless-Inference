@@ -1,5 +1,5 @@
 MODEL:
-  detector: "checkpoints/detector_882k_ssl_20261013_r3.onnx"
+  detector: "checkpoints/detector_882k.onnx"
   refiner: "checkpoints/refiner.onnx"
 
 PIPELINE:
