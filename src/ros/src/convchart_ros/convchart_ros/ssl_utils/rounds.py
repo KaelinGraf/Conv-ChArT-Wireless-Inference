@@ -106,7 +106,9 @@ def evaluate_onnx(pipeline, heldout_dirs, anchor_fn=None, groups=((0.0, 20.0), (
             good = sum(1 for k, v in dets.items() for u, w in v
                        if any(kk == k and np.hypot(u - x, w - y) <= 2.0 for kk, x, y in pos))
             fit = anchor_fn(res) if anchor_fn else None
-            rows.append((rec["board_level"], len(pos), hits, ids, good, fit, rec.get("s_px")))
+            pose = res.get("rvec") is not None
+            rows.append((rec["board_level"], len(pos), hits, ids, good, fit, rec.get("s_px"), pose,
+                         pose and bool(res.get("ambiguous"))))
     out = {}
     names = ["dark", "dim", "bright"]
 
@@ -120,9 +122,12 @@ def evaluate_onnx(pipeline, heldout_dirs, anchor_fn=None, groups=((0.0, 20.0), (
             continue
         ref, hit, ids, good = (sum(r[i] for r in rs) for i in (1, 2, 3, 4))
         fits = [r[5] for r in rs if r[5] is not None]
+        poses = sum(r[7] for r in rs)
         out[name] = {"frames": len(rs), "recall": round(hit / ref, 4) if ref else None,
                      "id_precision": round(good / ids, 4) if ids else None,
-                     "fit_rate": round(float(np.mean(fits)), 4) if fits else None}
+                     "fit_rate": round(float(np.mean(fits)), 4) if fits else None,
+                     "pose_rate": round(poses / len(rs), 4),
+                     "ambiguous_rate": round(sum(r[8] for r in rs) / poses, 4) if poses else None}
     return out
 
 

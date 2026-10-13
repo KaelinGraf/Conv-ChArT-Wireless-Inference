@@ -3,6 +3,9 @@ A self-contained record of one ssl fine-tune session, for evaluating it and for 
 
     python3 -m convchart_ros.ssl_utils.record <ssl_output/session> <out_dir>
 
+A live session (ssl_node), or an offline one (ssl_utils.offline_loop; its passes and rounds are
+in loop.jsonl).
+
 Writes <out_dir>/README.md: what ran and with which settings, the data the session gathered, each round's training
 and gate results, and the caveats that matter when the numbers are evaluated. Copies everything small next to it:
 data/ (session.json, rounds.jsonl, segments.jsonl, base_synth_val.json, and per round result.json, synth_val.json,
@@ -106,12 +109,85 @@ def _f(x, fmt="{:.4f}"):
     return "-" if x is None else fmt.format(x)
 
 
+def _offline_what(meta: dict, p: dict, loop: list, n_bgs: int) -> list:
+    """Return the "What ran" lines of an offline session (ssl_utils.offline_loop)."""
+    out = ["- Offline looped self-supervised fine-tuning of the Conv-ChArT detector over frames "
+           "already on disk (`python3 -m convchart_ros.ssl_utils.offline_loop`): each pass "
+           "relabels every stored frame with the teacher; a candidate trained from the base on "
+           "all of the pass's train frames is gated against the teacher on its held-out frames; "
+           "an accepted candidate teaches the next pass."]
+    for s in meta.get("streams") or []:
+        span = ""
+        if s.get("first"):
+            span = (f" from {_when(s['first'])} to {_when(s['last'])} "
+                    f"({(s['last'] - s['first']) / 60:.0f} min)")
+        out.append(f"- Frames: {s['frames']}{span}, in `{s['dir']}`.")
+    out += [f"- Every round trains from `{meta.get('base_detector')}` (the release weights); "
+            f"the first teacher was `{meta.get('teacher')}`; the pipeline config's refiner is "
+            "not trained.",
+            *[f"- Resumed {r.get('at')}." for r in meta.get("resumes") or []],
+            f"- Model config: `{p.get('model_config')}`. Lens: {meta.get('lens')} (CAMERA.K and "
+            f"dist from `{meta.get('config')}`, copied into the session when it started).",
+            "- Backgrounds for the synthetic share and the synthetic validation: "
+            f"`{p.get('backgrounds')}` ({n_bgs} images).",
+            "- The loop ends when a candidate is rejected (validation did not improve), when a "
+            f"new teacher labels fewer than max(1, {p.get('min_growth', 0):.1%} of the previous "
+            "pass) more frames (no more frames can be labelled), or after "
+            f"{p.get('max_rounds')} rounds."]
+    if loop and loop[-1].get("kind") == "exit":
+        end = loop[-1]
+        out.append(f"- Ended: {end['reason']}"
+                   + (f" ({end['detail']})" if end.get("detail") else "")
+                   + f"; best model `{end['best_onnx']}`. Nothing was deployed.")
+    return out
+
+
+def _short(path) -> str:
+    return "/".join(Path(str(path)).parts[-4:])
+
+
+def _loop_table(loop: list) -> list:
+    """Tabulate each pass and its round: labels, growth, the gate, the ambiguity diagnostic."""
+    rounds = {}
+    for x in loop:
+        if x.get("kind") == "round":
+            rounds.setdefault(x["pass"], []).append(x)
+    L = ["| pass | teacher | labelled train / held-out (anchors, tracked) | growth (needed) | "
+         "relabel min | round | held-out recall teacher -> cand | far (<16 px) recall teacher "
+         "-> cand | ambiguous poses base / teacher / cand | gate failed | decision |",
+         "|---|---|---|---|---|---|---|---|---|---|---|"]
+    for ps in (x for x in loop if x.get("kind") == "pass"):
+        growth = ("-" if ps.get("growth") is None
+                  else f"{ps['growth']:+d} ({ps['growth_needed']})")
+        head = (f"| {ps['pass']} | `{_short(ps['teacher'])}` | {ps['train']} / "
+                f"{ps['heldout']} ({ps.get('anchor')}, {ps.get('tracked')}) | {growth} | "
+                f"{ps.get('seconds', 0) / 60:.0f} | ")
+        for r in rounds.get(ps["pass"]) or [None]:
+            if r is None:
+                L.append(head + f"- |||||{ps.get('decision', '')} |")
+            elif "error" in r:
+                L.append(head + f"{r['round']} | failed: {r['error']} |||| "
+                         f"{r.get('decision', '')} |")
+            else:
+                rec, far = r["recall"], r["far_recall"]
+                amb = r.get("ambiguous_rate") or {}
+                failed = [k for k, ok in (r.get("gate") or {}).items() if not ok]
+                L.append(head + f"{r['round']} | {_f(rec['teacher'])} -> {_f(rec['candidate'])} | "
+                         f"{_f(far['teacher'])} -> {_f(far['candidate'])} | "
+                         + " / ".join(_f(amb.get(k), "{:.1%}")
+                                      for k in ("base", "teacher", "candidate"))
+                         + f" | {', '.join(failed) or 'none'} | {r.get('decision', '')} |")
+    return L
+
+
 def record(session: Path, out: Path) -> Path:
     session, out = session.resolve(), out.resolve()
     root = session.parents[2]
     meta = json.loads((session / "session.json").read_text())
     resumes = meta.get("resumes") or []
     p = (resumes[-1].get("params") if resumes else None) or meta["params"]
+    offline = meta.get("kind") == "offline"
+    loop = _jsonl(session / "loop.jsonl")
     rounds = _jsonl(session / "rounds.jsonl")
     seen = {}
     for r in rounds:
@@ -128,13 +204,14 @@ def record(session: Path, out: Path) -> Path:
     for r in _jsonl(session / "relabel.jsonl"):
         t = relabelled.setdefault(r.get("gen"), Counter())
         t.update({k: r.get(k, 0) for k in ("labelled", "anchor", "tracked", "kept")})
-    stream = session / "stream"
     n_raw = size_raw = 0
-    if stream.is_dir():
-        with os.scandir(stream) as it:
-            for e in it:
-                n_raw += 1
-                size_raw += e.stat().st_size
+    for stream in ([_local(s["dir"], root) for s in meta.get("streams") or []] if offline
+                   else [session / "stream"]):
+        if stream.is_dir():
+            with os.scandir(stream) as it:
+                for e in it:
+                    n_raw += 1
+                    size_raw += e.stat().st_size
     ended = (session / "summary.json").exists()
     bgs = _local(p.get("backgrounds", ""), root)
     n_bgs = sum(1 for _ in bgs.iterdir()) if bgs.is_dir() else 0
@@ -159,7 +236,7 @@ def record(session: Path, out: Path) -> Path:
     data, figs = out / "data", out / "figures"
     for d in (data, figs):
         d.mkdir(parents=True, exist_ok=True)
-    for name in ("session.json", "rounds.jsonl", "segments.jsonl", "summary.json"):
+    for name in ("session.json", "rounds.jsonl", "segments.jsonl", "summary.json", "loop.jsonl"):
         if (session / name).exists():
             shutil.copy2(session / name, data / name)
     if (session / "rounds" / "base_synth_val.json").exists():
@@ -220,6 +297,10 @@ def record(session: Path, out: Path) -> Path:
          + (f"held out: every {p.get('heldout_every')}th block of {p.get('split_block_s')} s of frame stamps, so a "
             "frame keeps its split whichever teacher labels it |" if p.get("split_block_s") else
             f"every {p.get('heldout_every')}th chunk held out |"),
+         "| loop | each pass relabels every stored frame; a round follows each pass, on all "
+         "its train frames; the loop stops at a rejected candidate, at growth under max(1, "
+         f"{p.get('min_growth', 0):.1%}) of the previous pass, or after "
+         f"{p.get('max_rounds')} rounds |" if offline else
          f"| round trigger | {p.get('min_train_frames')} train and {p.get('min_heldout_frames')} held-out frames, "
          f"then each time the train bank grows by {p.get('retrain_growth'):.0%} |",
          f"| acceptance | held-out recall up by >= {cfg_round.get('min_recall_gain')}, held-out ID precision down by "
@@ -252,13 +333,14 @@ def record(session: Path, out: Path) -> Path:
           "## Rounds", "",
           "| round | started | min | train / held-out | steps (passes) | train loss first 50 -> last 50 steps | "
           "held-out recall ref -> cand | far (<16 px) recall ref -> cand | ID precision ref -> cand | fit rate ref "
-          "-> cand | synth M-04 base -> cand | synth M-01 mean px base -> cand | gate failed | accepted |",
-          "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
+          "-> cand | synth M-04 base -> cand | synth M-01 mean px base -> cand | "
+          "ambiguous poses ref -> cand | gate failed | accepted |",
+          "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
     for r in rounds:
         if "reference" not in r:
             L.append(f"| {r['round']} | {_when(r['t_start'])[11:16]} | {r.get('seconds', 0) / 60:.1f} | "
                      f"{r.get('train_frames')} / {r.get('heldout_frames')} | {r.get('steps', '-')} | failed: "
-                     f"{r.get('error', '?')} |||||||| no |")
+                     f"{r.get('error', '?')} ||||||||| no |")
             continue
         ref, cand = r["reference"]["all"], r["candidate"]["all"]
         far = [(x.get("far <16 px") or {}).get("recall") for x in (r["reference"], r["candidate"])]
@@ -274,14 +356,20 @@ def record(session: Path, out: Path) -> Path:
             f"{_f(ref['fit_rate'], '{:.3f}')} -> {_f(cand['fit_rate'], '{:.3f}')} | "
             f"{_f((sb.get('m04') or {}).get('accuracy'))} -> {_f((sc.get('m04') or {}).get('accuracy'))} | "
             f"{_f((sb.get('m01') or {}).get('mean'), '{:.3f}')} -> {_f((sc.get('m01') or {}).get('mean'), '{:.3f}')}"
+            f" | {_f(ref.get('ambiguous_rate'), '{:.1%}')} -> "
+            f"{_f(cand.get('ambiguous_rate'), '{:.1%}')}"
             f" | {', '.join(failed) or 'none'} | {'yes' if r.get('accepted') else 'no'} |")
     if not rounds:
-        L.append("| - | no round has finished yet |||||||||||||")
+        L.append("| - | no round has finished yet ||||||||||||||")
     L += ["", "Reference = the model the candidate had to beat (the current teacher's model); base = the release "
-          "weights. M-04 is synthetic ID accuracy; M-01 is the synthetic corner error in pixels.", "",
+          "weights. M-04 is synthetic ID accuracy; M-01 is the synthetic corner error in pixels. "
+          "Ambiguous poses: the share of held-out frames with a pose whose two IPPE solutions "
+          "src/inference.py could not tell apart (reprojection errors within 1.5x); a "
+          "diagnostic, not part of the gate.", "",
           "## Caveats for evaluation", "",
           "1. **The held-out labels are pseudo-labels**, not hand labels. Of the "
-          f"{ho['frames']} held-out frames {ho_round} was scored on, {ho_anchor} are the starting teacher's own "
+          f"{ho['frames']} held-out frames {ho_round} was scored on, {ho_anchor} are the "
+          + ("teacher's (the reference's)" if offline else "starting teacher's") + " own "
           f"detections (anchors) and "
           f"{ho_tracked} were labelled by tracking, where it could not fit the board. So the reference scores "
           "high nearly by construction; the fit-rate column shows how many of the tracked frames each model "
@@ -291,10 +379,16 @@ def record(session: Path, out: Path) -> Path:
           f"3. **The held-out set is small**: {ho_round} was scored on {ho['frames']} frames, {ho['corners']} "
           f"labelled corners, so one "
           f"corner is {1 / max(1, ho['corners']):.4f} of recall and the acceptance margin is about "
-          f"{round(cfg_round.get('min_recall_gain', 0) * ho['corners'])} corners. It only grows by a chunk every "
-          f"{p.get('heldout_every')} chunks banked (now {banked['heldout']['frames']} frames), and later rounds "
-          "are scored on the larger set.",
-          "4. **Each round starts from the release weights** on all frames banked so far; rounds are not chained.",
+          f"{round(cfg_round.get('min_recall_gain', 0) * ho['corners'])} corners. "
+          + (f"Each pass holds out every {p.get('heldout_every')}th block of "
+             f"{p.get('split_block_s')} s, as much of it as that pass's teacher labels."
+             if offline else
+             f"It only grows by a chunk every {p.get('heldout_every')} chunks banked (now "
+             f"{banked['heldout']['frames']} frames), and later rounds are scored on the "
+             "larger set."),
+          "4. **Each round starts from the release weights** on "
+          + ("all the train frames of its pass" if offline else "all frames banked so far")
+          + "; rounds are not chained.",
           "5. **Diversity**: check the coverage table above. Buckets with no frames are views the fine-tune has "
           "not seen.",
           "6. The synthetic M-01 corner error is allowed to rise by up to the gate's margin per round; read it "
@@ -307,6 +401,17 @@ def record(session: Path, out: Path) -> Path:
           f"- Not copied, in `{session}`: harvest/train and harvest/heldout (images.npy + records.json per chunk: "
           "the labelled frames), stream/ (every raw frame, named by stamp), rounds/round*/detector.onnx (each "
           "candidate). Checkpoints: Conv-ChArT/runs/ssl_<session>_r*/."]
+    if offline:
+        i = L.index("## What ran") + 2
+        L[i:L.index("## Settings") - 1] = _offline_what(meta, p, loop, n_bgs)
+        i = L.index("## Data gathered") + 2
+        L[i:i + 4] = [f"- Stored frames: {n_raw} ({size_raw / 1e9:.2f} GB); every pass "
+                      "relabels all of them.", L[i + 2]]
+        i = L.index("## Rounds")
+        L[i:i] = ["## Loop", "", *_loop_table(loop), ""]
+        L.append("- Offline: `data/loop.jsonl` (a line per pass and per round, then the exit); "
+                 "not copied: harvest/gen<g>/ (each pass's labelled frames; labels.jsonl names "
+                 "each label's frame file).")
     (out / "README.md").write_text("\n".join(L) + "\n")
     return out / "README.md"
 

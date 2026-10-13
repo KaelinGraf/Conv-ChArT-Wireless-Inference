@@ -187,3 +187,24 @@ def test_held_out_groups_include_the_board_size_with_far_frames_apart(tmp_path):
     assert {g: out[g]["frames"] for g in ("all", "dim", "far <16 px", "16-32 px", "32-64 px", ">=64 px")} == {
         "all": 6, "dim": 6, "far <16 px": 2, "16-32 px": 1, "32-64 px": 1, ">=64 px": 1}
     assert out["far <16 px"]["recall"] == 1.0
+
+
+def test_held_out_scores_count_the_poses_the_pipeline_finds_ambiguous(tmp_path):
+    corners = [{"index": k, "x": 10.0 * k, "y": 5.0, "visible": True} for k in range(4)]
+    recs = [{"board_level": 40.0, "s_px": s, "corners": corners}
+            for s in (10.0, 12.0, 14.0, 40.0, 40.0)]
+    (tmp_path / "records.json").write_text(json.dumps({"meta": {}, "records": recs}))
+    np.save(tmp_path / "images.npy", np.arange(len(recs), dtype=np.uint8).reshape(-1, 1, 1))
+    poses = {0: True, 1: True, 2: False, 3: False}
+
+    class Posed:
+        def run_inference(self, img):
+            i = int(img[0, 0])
+            return {"corners": [{"index": c["index"], "x": c["x"], "y": c["y"]} for c in corners],
+                    "rvec": np.zeros(3) if i in poses else None, "ambiguous": poses.get(i, False)}
+
+    out = evaluate_onnx(Posed(), [str(tmp_path)])
+    assert out["all"]["pose_rate"] == 0.8 and out["all"]["ambiguous_rate"] == 0.5
+    far = out["far <16 px"]
+    assert far["pose_rate"] == 1.0 and far["ambiguous_rate"] == round(2 / 3, 4)
+    assert out["32-64 px"]["pose_rate"] == 0.5 and out["32-64 px"]["ambiguous_rate"] == 0.0
