@@ -1,5 +1,5 @@
 MODEL:
-  detector: "checkpoints/detector_882k.onnx"
+  detector: "checkpoints/detector_882k_ssl_20261013_r3.onnx"
   refiner: "checkpoints/refiner.onnx"
 
 PIPELINE:
@@ -13,11 +13,12 @@ PIPELINE:
 
 BOARD:
   squares: [5, 5]
-  square_length_m: null
+  square_length_m: 0.024
 
 CAMERA:
-  K: null
-  dist: null
+  K: [[356.65571428510805, 0.0, 327.55181541731486], [0.0, 356.62625866338544, 234.19377039134744], [0.0, 0.0, 1.0]]
+  dist: [0.05350674753450749, -0.10031543312208781, 0.0003128032616877976, 0.00014277460088732907, 0.03174167274614614]
+  image_size: [640, 480]
 
 CALIBRATION:
   board:
