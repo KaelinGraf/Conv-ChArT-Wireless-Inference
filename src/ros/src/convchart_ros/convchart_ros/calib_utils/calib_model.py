@@ -23,9 +23,9 @@ times wider than the input, that is 2.5 times as many pixels.
 """
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
 import os
-import threading
 
 import cv2
 import numpy as np
@@ -76,8 +76,9 @@ class ModelDetector:
     """
 
     def __init__(self, cfg_path: str | os.PathLike):
+        self._model_thread = ThreadPoolExecutor(max_workers=1, thread_name_prefix="calib_model")
         try:
-            self._pipe = inference_pipeline(str(cfg_path))
+            self._pipe = self._model_thread.submit(inference_pipeline, str(cfg_path)).result()
         except AssertionError as error:
             raise RuntimeError(f"cannot load the model of {cfg_path}: {error} (detector:=opencv "
                                f"calibrates without it)") from None
@@ -86,7 +87,6 @@ class ModelDetector:
             raise ValueError(f"BOARD.squares in {cfg_path} is {list(squares)}, but the model's "
                              f"board has {list(MODEL_BOARD.squares)}")
         self._tuned = self._pipe.pipeline
-        self._lock = threading.Lock()
 
     @property
     def square_length_m(self) -> float | None:
@@ -101,12 +101,14 @@ class ModelDetector:
         nominal = np.array([[f, 0.0, (w - 1) / 2.0], [0.0, f, (h - 1) / 2.0], [0.0, 0.0, 1.0]])
         scale = max(1.0, w / self._pipe.W_in)
         gate = replace(self._tuned, lattice_tol_px=self._tuned.lattice_tol_px * scale)
-        with self._lock:
+
+        def run() -> dict:
             self._pipe.pipeline = gate
             try:
-                result = self._pipe.run_inference(frame, K=nominal, dist=_NO_DIST)
+                return self._pipe.run_inference(frame, K=nominal, dist=_NO_DIST)
             finally:
                 self._pipe.pipeline = self._tuned
+        result = self._model_thread.submit(run).result()
         found = [(c["index"], c["x"], c["y"]) for c in result["corners"]
                  if c["index"] is not None]
         ids = np.array([index for index, _, _ in found], dtype=int)
@@ -122,8 +124,8 @@ class ModelDetector:
         @args: frame: uint8 mono or BGR frame at the resolution K belongs to.
         """
         dist = _NO_DIST if dist is None else np.asarray(dist, dtype=np.float64)
-        with self._lock:
-            result = self._pipe.run_inference(frame, K=np.asarray(K, dtype=np.float64), dist=dist)
+        result = self._model_thread.submit(self._pipe.run_inference, frame,
+                                           K=np.asarray(K, dtype=np.float64), dist=dist).result()
         if result["rvec"] is None or result["tvec"] is None:
             return None
         rotation = cv2.Rodrigues(np.asarray(result["rvec"], dtype=np.float64).reshape(3, 1))[0]
