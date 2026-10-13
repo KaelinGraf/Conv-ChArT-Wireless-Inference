@@ -379,6 +379,30 @@ def test_evaluate_rectangular_board_rows_use_the_column_count():
                                   make_board(spec).getChessboardCorners()[:12])
 
 
+def test_evaluate_uses_the_detector_it_is_given():
+    truth = cv2.projectPoints(CHESS.astype(np.float64), RVEC, TVEC, K_TRUE, None)[0].reshape(-1, 2)
+    seen = []
+
+    def detect(gray):
+        seen.append(gray.shape)
+        return truth[3:], np.arange(3, 16)
+
+    session = CalibrationSession(CalibrationSettings(), detect=detect)
+    det = session.evaluate(np.zeros((FULL[1], FULL[0], 3), np.uint8))
+    assert seen == [(FULL[1], FULL[0])], 'called once, on the grey frame'
+    assert det.kept and det.reason == ''
+    np.testing.assert_array_equal(det.ids, np.arange(3, 16))
+    np.testing.assert_array_equal(det.corners, truth[3:])
+    np.testing.assert_array_equal(det.obj_points, CHESS[3:])
+    np.testing.assert_allclose(det.img_points, truth[3:], atol=1e-3)
+    few = CalibrationSession(CalibrationSettings(), detect=lambda gray: (truth[:5], np.arange(5)))
+    assert few.evaluate(np.zeros((FULL[1], FULL[0]), np.uint8)).reason == 'too few corners (5/8)'
+    none = CalibrationSession(CalibrationSettings(),
+                              detect=lambda gray: (np.zeros((0, 2)), np.zeros(0, int)))
+    det = none.evaluate(np.zeros((FULL[1], FULL[0]), np.uint8))
+    assert det.reason == REJECT_NO_BOARD and det.corners.shape == (0, 2)
+
+
 def test_evaluate_records_nothing():
     session = CalibrationSession(CalibrationSettings())
     session.evaluate(render_board(BoardSpec(), RVEC, TVEC))

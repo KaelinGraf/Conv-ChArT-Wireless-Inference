@@ -14,7 +14,7 @@ import os
 from pathlib import Path
 import shutil
 import threading
-from typing import Any
+from typing import Any, Callable
 import uuid
 
 import cv2
@@ -24,6 +24,7 @@ import yaml
 from .calib_board import board_spec_from_cfg, BoardSpec, make_board
 
 REJECT_NO_BOARD = "no board found"
+CornerDetector = Callable[[np.ndarray], tuple[np.ndarray, np.ndarray]]
 REJECT_COLLINEAR = "corners in a line"
 _REJECT_TOO_FEW = "too few corners ({}/{})"
 
@@ -140,7 +141,7 @@ class _View:
 class CalibrationSession:
     """One calibration run: checks captures, keeps the usable ones and solves over them."""
 
-    def __init__(self, settings: CalibrationSettings):
+    def __init__(self, settings: CalibrationSettings, detect: CornerDetector | None = None):
         make_board(settings.board)
         if settings.min_corners_resolved < 4:
             raise ValueError(f"min_corners must be at least 4 (calibrating needs 4 points per "
@@ -150,8 +151,10 @@ class CalibrationSession:
         if len(settings.coverage_grid) != 2 or min(settings.coverage_grid) < 1:
             raise ValueError(f"coverage_grid must be two positive counts, "
                              f"got {settings.coverage_grid}")
-        charuco_offset_px()
+        if detect is None:
+            charuco_offset_px()
         self._settings = settings
+        self._detect = detect
         self._lock = threading.Lock()
         self._views: list[_View] = []
         self._next_index = 0
@@ -165,12 +168,19 @@ class CalibrationSession:
         gray = _to_gray(frame)
         size = (int(gray.shape[1]), int(gray.shape[0]))
         board = make_board(self._settings.board)
-        charuco_corners, charuco_ids, _, _ = cv2.aruco.CharucoDetector(board).detectBoard(gray)
-        if charuco_ids is None or len(charuco_ids) == 0:
+        if self._detect is not None:
+            corners, ids = self._detect(gray)
+            corners = np.asarray(corners, dtype=np.float64).reshape(-1, 2)
+            ids = np.asarray(ids).reshape(-1).astype(int)
+        else:
+            charuco_corners, charuco_ids, _, _ = cv2.aruco.CharucoDetector(board).detectBoard(gray)
+            found = charuco_ids is not None and len(charuco_ids) > 0
+            corners = (charuco_corners.reshape(-1, 2).astype(np.float64) - charuco_offset_px()
+                       if found else np.zeros((0, 2)))
+            ids = charuco_ids.reshape(-1).astype(int) if found else np.zeros(0, dtype=int)
+        if len(ids) == 0:
             return Detection(False, REJECT_NO_BOARD, np.zeros((0, 2)), np.zeros(0, dtype=int),
                              size, None, None)
-        corners = charuco_corners.reshape(-1, 2).astype(np.float64) - charuco_offset_px()
-        ids = charuco_ids.reshape(-1).astype(int)
         minimum = self._settings.min_corners_resolved
         if len(ids) < minimum:
             return Detection(False, _REJECT_TOO_FEW.format(len(ids), minimum), corners, ids, size,
@@ -179,7 +189,7 @@ class CalibrationSession:
         if len(np.unique(ids // per_row)) < 2 or len(np.unique(ids % per_row)) < 2:
             return Detection(False, REJECT_COLLINEAR, corners, ids, size, None, None)
         obj_points, img_points = board.matchImagePoints(
-            corners.astype(np.float32).reshape(-1, 1, 2), charuco_ids)
+            corners.astype(np.float32).reshape(-1, 1, 2), ids.astype(np.int32).reshape(-1, 1))
         return Detection(True, "", corners, ids, size,
                          obj_points.reshape(-1, 3).astype(np.float32),
                          img_points.reshape(-1, 2).astype(np.float32))
