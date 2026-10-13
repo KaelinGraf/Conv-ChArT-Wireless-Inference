@@ -178,6 +178,7 @@ def test_finetune_finds_the_model_config_and_reports_missing_backgrounds(repo):
     ({"task": "demo", "source": "fake", "video": "x"}, "drop one of them"),
     ({"task": "calibrate", "video": "CLIP"}, "a video cannot serve"),
     ({"task": "calibrate", "source": "fake", "auto_replace": "true"}, "synthetic camera's K"),
+    ({"task": "calibrate", "detector": "sift"}, "detector:= must be model or opencv"),
     ({"task": "infer"}, "no CAMERA.K"),
     ({"task": "demo", "headless": "true"}, "needs record:="),
     ({"task": "demo", "headless": "maybe"}, "true or false"),
@@ -201,6 +202,13 @@ def test_live_finetune_caps_the_labelling_rate_and_keeps_the_frames_and_a_replay
     assert replay["max_rate_hz"] == 0.0 and replay["save_frames"] is False
     with pytest.raises(PlanError, match="max_rate:= must be >= 0"):
         run(repo, task="finetune", max_rate="-1")
+
+
+def test_calibrate_finds_corners_with_the_model_unless_told_opencv(repo):
+    p = run(repo, task="calibrate")
+    assert p.nodes[0].parameters["detector"] == "model" and any("corners from the model" in n for n in p.notes)
+    p = run(repo, task="calibrate", detector="OpenCV")
+    assert p.nodes[0].parameters["detector"] == "opencv" and any("corners from OpenCV" in n for n in p.notes)
 
 
 def test_window_tasks_need_a_display_and_headless_recording_does_not(repo):

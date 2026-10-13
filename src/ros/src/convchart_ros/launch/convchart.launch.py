@@ -1,6 +1,7 @@
 """Launch one task of the Conv-ChArT wireless pipeline on the laptop, picked with task:=.
 
     ros2 launch convchart_ros convchart.launch.py task:=calibrate [auto_replace:=true]   # Pi camera, GUI
+    ros2 launch convchart_ros convchart.launch.py task:=calibrate detector:=opencv        # OpenCV's corners
     ros2 launch convchart_ros convchart.launch.py task:=calibrate source:=fake            # synthetic camera
     ros2 launch convchart_ros convchart.launch.py task:=demo video:=clip.mp4 [record:=out.mp4] [headless:=true]
     ros2 launch convchart_ros convchart.launch.py task:=demo                              # live, Pi stream

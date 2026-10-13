@@ -53,6 +53,9 @@ ARGUMENTS = {
                           "(closing it ends the launch): auto opens it when there is a display, true insists, false "
                           "leaves it out"),
     "auto_replace": ("false", "calibrate: write K and dist into the config after every solve"),
+    "detector": ("model", "calibrate: what finds the board's corners: model (the config's MODEL, with a live "
+                          "distance readout for setting the focus) or opencv (cv2.aruco's ChArUco detector, any "
+                          "board)"),
     "output_dir": ("", "calibrate / finetune: session folder root; default beside the config"),
     "model_config": ("", "finetune: the Conv-ChArT config the deployed detector was trained with; "
                          "default picked from MODEL.detector"),
@@ -223,10 +226,16 @@ def plan(args: dict, repo: Path | None, env=None) -> Plan:
         if auto_replace and source == "fake":
             raise PlanError(f"auto_replace:=true with source:=fake would write the synthetic camera's K into "
                             f"{config}")
+        detector = a["detector"].strip().lower()
+        if detector not in ("model", "opencv"):
+            raise PlanError(f"detector:= must be model or opencv, got {a['detector']!r}")
         nodes.append(NodeSpec("calibrate", {"config": str(config), "auto_replace": auto_replace,
-                                            "output_dir": a["output_dir"].strip()}, True))
-        notes.append("task: the calibration window (SPACE capture, U undo, M coverage, Q quit); stills come from "
-                     f"{shown.rstrip('/')}/image_full_res" + (", written into the config" if auto_replace else ""))
+                                            "output_dir": a["output_dir"].strip(), "detector": detector}, True))
+        notes.append("task: the calibration window (SPACE capture, U undo, M coverage"
+                     + (", D distance" if detector == "model" else "") + ", Q quit); stills come from "
+                     f"{shown.rstrip('/')}/image_full_res, corners from "
+                     + ("the model" if detector == "model" else "OpenCV")
+                     + (", written into the config" if auto_replace else ""))
     elif task == "demo":
         nodes.append(pose_view(True, headless))
         notes.append("task: the pose overlay" + (f", recorded to {record}" if record else "")

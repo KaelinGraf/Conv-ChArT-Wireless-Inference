@@ -7,10 +7,12 @@ nothing here can reach a real robot or another test run; the node also starts as
 from ROS parameters, in a subprocess under the same isolation. Captures go through
 CalibrateCam.request_capture(), as the GUI's SPACE key does. run_gui runs against stand-ins for
 OpenCV's window functions, so no window ever opens. The calibration must recover the fake camera's
-ground truth (K_full, dist).
+ground truth (K_full, dist). These tests run the node with OpenCV's corner detector (custom boards,
+configs without a model); test_calib_model.py covers the model's, with the GPU and the checkpoints.
 """
 
 from dataclasses import dataclass
+import importlib.util
 import os
 from pathlib import Path
 import subprocess
@@ -24,6 +26,7 @@ from convchart_ros.calib_utils.calib_board import board_spec_from_cfg
 from convchart_ros.calib_utils.calib_session import scale_intrinsics
 from convchart_ros.calib_utils.fake_camera import FakeCamera
 from convchart_ros.calibrate import CalibrateCam, GuiState, run_gui
+from convchart_ros.launch_plan import find_repo
 import cv2
 import numpy as np
 import pytest
@@ -200,12 +203,17 @@ class Rig:
 
 
 def start_rig(tmp_path, calibration, camera_args=None, **node_args):
-    """Write a config with this CALIBRATION block and start a camera with its board and a node."""
+    """
+    Write a config with this CALIBRATION block and start a camera with its board and a node.
+
+    The node detects with OpenCV unless node_args say otherwise.
+    """
     config = write_config(tmp_path / 'cfg' / 'cfg.yaml', calibration)
     camera = FakeCamera(board_spec=board_spec_from_cfg(calibration.get('board')),
                         **(camera_args or {}))
     try:
-        node = CalibrateCam(cfg_pth=str(config), output_dir=str(tmp_path / 'out'), **node_args)
+        node = CalibrateCam(cfg_pth=str(config), output_dir=str(tmp_path / 'out'),
+                            **{'detector': 'opencv', **node_args})
     except BaseException:
         camera.destroy_node()
         raise
@@ -315,6 +323,9 @@ def run(request):
     ('cfg.yaml', {'min_view': 3}, {}, ValueError, 'unknown CALIBRATION keys'),
     ('cfg.yaml', {'board': {'squares': [1, 5]}}, {}, ValueError, 'at least 2x2'),
     ('cfg.yaml', None, {'capture_timeout_s': 0.0}, ValueError, 'capture_timeout_s'),
+    ('cfg.yaml', None, {'detector': 'sift'}, ValueError, 'detector must be one of model, opencv'),
+    ('cfg.yaml', {'board': CUSTOM_BOARD}, {'detector': 'model'}, ValueError,
+     'use detector:=opencv'),
 ])
 def test_bad_configuration_is_rejected(ros, tmp_path, cfg_pth, calibration, node_args, error,
                                        match):
@@ -343,7 +354,8 @@ def test_ros_parameters_configure_the_node_as_main_does(ros, tmp_path):
     result = subprocess.run(
         [sys.executable, '-c', code, '--ros-args', '-r', f'__ns:={NAMESPACE}_params',
          '-p', f'config:={config}', '-p', f'output_dir:={out}', '-p', 'auto_replace:=true',
-         '-p', 'capture_timeout_s:=3'],
+         '-p', 'capture_timeout_s:=3',
+         '-p', 'detector:=opencv'],
         env=env, capture_output=True, text=True, timeout=TIMEOUT_S)
     assert result.returncode == 0, result.stderr
     [session_dir] = out.iterdir()
@@ -351,6 +363,66 @@ def test_ros_parameters_configure_the_node_as_main_does(ros, tmp_path):
     assert log['session']['config'] == str(config)
     assert log['session']['auto_replace'] is True
     assert log['board']['squares'] == CUSTOM_BOARD['squares'], 'the board from that config'
+
+
+def repo_model():
+    """The repo's MODEL block with absolute paths; None without onnxruntime or the checkpoints."""
+    repo = find_repo(Path(__file__))
+    if repo is None or importlib.util.find_spec('onnxruntime') is None:
+        return None
+    model = (yaml.safe_load((repo / 'cfg' / 'cfg.yaml').read_text()) or {}).get('MODEL') or {}
+    files = {key: repo / str(model.get(key, '')) for key in ('detector', 'refiner')}
+    return ({key: str(path) for key, path in files.items()}
+            if all(path.is_file() for path in files.values()) else None)
+
+
+def test_the_model_reads_the_boards_distance_and_calibrates(ros, tmp_path):
+    model = repo_model()
+    if model is None:
+        pytest.skip("needs onnxruntime and the repo's MODEL checkpoints")
+    camera = FakeCamera()
+    K_stream = scale_intrinsics(camera.K_full, camera.full_size, STREAM_SIZE)
+    config = tmp_path / 'cfg' / 'cfg.yaml'
+    config.parent.mkdir()
+    config.write_text(yaml.safe_dump({
+        'MODEL': model,
+        'BOARD': {'squares': [5, 5], 'square_length_m': 1.0},
+        'CAMERA': {'K': K_stream.tolist(), 'dist': camera.dist.tolist(),
+                   'image_size': list(STREAM_SIZE)},
+        'CALIBRATION': {'review_s': 0.05}}))
+    try:
+        node = CalibrateCam(cfg_pth=str(config), output_dir=str(tmp_path / 'out'))
+    except BaseException:
+        camera.destroy_node()
+        raise
+    rig = Rig(camera, node, config)
+    try:
+        wait_for_stream(node)
+        rvec, tvec = camera.poses[camera.pose_index]
+        centre = cv2.Rodrigues(rvec)[0] @ np.array([2.5, 2.5, 0.0]) + tvec
+        wait_until(lambda: isinstance(node.state().hud.distance, tuple), 'a distance reading')
+        z, straight = node.state().hud.distance
+        assert z == pytest.approx(centre[2], rel=0.02)
+        assert straight == pytest.approx(np.linalg.norm(centre), rel=0.02)
+        assert 'D distance' in node.state().hud.help
+        for _ in range(MIN_VIEWS):
+            capture(node)
+        wait_until(lambda: settled(node) and node.state().solution is not None, 'the solve')
+        state = node.state()
+        assert (state.hud.kept, state.hud.rejected) == (MIN_VIEWS, 0)
+        K, K_true = state.solution.K, camera.K_full
+        assert state.solution.rms < 0.3
+        np.testing.assert_allclose([K[0, 0], K[1, 1]], [K_true[0, 0], K_true[1, 1]], atol=3.0)
+        np.testing.assert_allclose([K[0, 2], K[1, 2]], [K_true[0, 2], K_true[1, 2]], atol=4.0)
+    finally:
+        rig.close()
+
+
+def test_opencv_shows_no_distance_readout(make_rig):
+    rig = make_rig()
+    wait_for_stream(rig.node)
+    state = rig.node.state()
+    assert state.hud.distance is None and 'distance' not in state.hud.help
 
 
 def test_calibration_recovers_the_fake_camera(run):
@@ -914,7 +986,8 @@ def test_main_stops_the_spin_loop_before_tearing_down(ros, tmp_path, monkeypatch
         events.append('spin loop ended')
 
     events = patch_main(monkeypatch,
-                        lambda: Node(cfg_pth=str(config), output_dir=str(tmp_path / 'out')))
+                        lambda: Node(cfg_pth=str(config), output_dir=str(tmp_path / 'out'),
+                                     detector='opencv'))
     monkeypatch.setattr(calibrate, 'MultiThreadedExecutor', Executor)
     monkeypatch.setattr(calibrate, '_spin', spin)
     FakeWindow([-1, -1, ord('q')]).install(monkeypatch)

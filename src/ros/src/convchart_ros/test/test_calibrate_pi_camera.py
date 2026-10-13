@@ -76,7 +76,8 @@ def pi_rig(ros, tmp_path):
     made = []
 
     def make(**node_args):
-        node = CalibrateCam(cfg_pth=str(config), output_dir=str(tmp_path / 'out'), **node_args)
+        node = CalibrateCam(cfg_pth=str(config), output_dir=str(tmp_path / 'out'),
+                            **{'detector': 'opencv', **node_args})
         executor = MultiThreadedExecutor(num_threads=6)
         executor.add_node(camera)
         executor.add_node(node)

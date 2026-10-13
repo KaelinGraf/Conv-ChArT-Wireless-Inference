@@ -10,11 +10,17 @@ the calibration after every kept view, then writes the log and, with auto_replac
 CAMERA block. run_gui owns the OpenCV window on the main thread while a MultiThreadedExecutor
 spins the node in a background thread.
 
+The corners come from the deployed model (detector model, the default: the config's MODEL block
+through the inference pipeline, calib_model) or from OpenCV's ChArUco detector (detector opencv).
+With the model, the live view also shows the board's distance from the camera in large type, from
+the stream and the config's current CAMERA K and dist, to set the lens focus by before calibrating.
+
     ros2 run convchart_ros calibrate --ros-args -p config:=<cfg.yaml> [-p auto_replace:=true]
+        [-p detector:=opencv]
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 import functools
 import itertools
@@ -38,6 +44,7 @@ from rclpy.task import Future
 from sensor_msgs.msg import CompressedImage
 import yaml
 
+from .calib_utils.calib_board import make_board
 from .calib_utils.calib_session import (
     build_log, CalibrationSession, Detection, scale_intrinsics, settings_from_cfg, Solution,
     write_camera_to_cfg, write_log)
@@ -48,12 +55,16 @@ WINDOW_NAME = "calibrate"
 LOG_NAME = "calibration_log.yaml"
 FRAMES_DIR = "frames"
 DEFAULT_CANVAS_SIZE = (640, 480)
+DETECTORS = ("model", "opencv")
 
 _MESSAGE_S = 4.0
 _STALL_S = 1.0
 _TIMEOUT_CHECK_S = 0.05
 _SPIN_WAIT_S = 0.1
 _GUI_WAIT_MS = 30
+_RANGE_PERIOD_S = 0.1
+_RANGE_HOLD_S = 0.5
+_HELP_DISTANCE = "SPACE capture   U undo   M coverage   D distance   Q quit"
 _QUIT_KEYS = (ord("q"), ord("Q"), 27)
 _PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 
@@ -104,7 +115,8 @@ class CalibrateCam(Node):
     """Ingest camera frames to calibrate the camera intrinsics and distortion coefficients."""
 
     def __init__(self, cfg_pth: str = "", auto_replace: bool = False, output_dir: str = "",
-                 capture_timeout_s: float = 5.0, capture_max_age_s: float = 0.5):
+                 capture_timeout_s: float = 5.0, capture_max_age_s: float = 0.5,
+                 detector: str = DETECTORS[0]):
         super().__init__("calibrate_cam_node")
         try:
             self._cfg_pth: str = str(self.declare_parameter("config", str(cfg_pth)).value)
@@ -121,6 +133,10 @@ class CalibrateCam(Node):
             self._capture_max_age_s = float(max_age)
             if not self._capture_max_age_s >= 0:
                 raise ValueError(f"capture_max_age_s must be >= 0, got {max_age}")
+            self._detector = str(self.declare_parameter("detector", str(detector)).value)
+            if self._detector not in DETECTORS:
+                raise ValueError(f"detector must be one of {', '.join(DETECTORS)}, "
+                                 f"got {self._detector!r}")
             if not self._cfg_pth:
                 raise ValueError("configuration path is not set (-p config:=<cfg.yaml>)")
             self._config_path = Path(os.path.abspath(self._cfg_pth))
@@ -129,7 +145,15 @@ class CalibrateCam(Node):
             if not isinstance(cfg, dict):
                 raise ValueError(f"{self._config_path} does not hold a YAML mapping")
             self._settings = settings_from_cfg(cfg)
-            self._session = CalibrationSession(self._settings)
+            make_board(self._settings.board)
+            self._model = None
+            if self._detector == "model":
+                from .calib_utils.calib_model import check_model_board, ModelDetector
+                check_model_board(self._settings.board)
+                self._model = ModelDetector(self._config_path)
+            self._session = CalibrationSession(
+                self._settings, detect=None if self._model is None else self._model.corners)
+            self._camera = _camera_from_cfg(cfg)
             started = datetime.now().astimezone()
             root = (Path(os.path.abspath(output_dir)) if output_dir
                     else self._config_path.parent.parent / "calibration_output")
@@ -159,6 +183,9 @@ class CalibrateCam(Node):
         self._view_files: dict[int, str] = {}
         self._views_lock = threading.Lock()
         self._n_rejected_files = 0
+        self._range = None
+        self._range_time = 0.0
+        self._range_stop = threading.Event()
 
         self._video_cb_group = MutuallyExclusiveCallbackGroup()
         self._calib_cb_group = MutuallyExclusiveCallbackGroup()
@@ -173,13 +200,21 @@ class CalibrateCam(Node):
         self._worker = threading.Thread(target=self._solve_worker, name="calibrate_solve",
                                         daemon=True)
         self._worker.start()
+        self._range_worker_thread = None
+        if self._model is not None and self._camera is not None:
+            self._range_worker_thread = threading.Thread(target=self._range_worker,
+                                                         name="calibrate_range", daemon=True)
+            self._range_worker_thread.start()
 
         spec = self._settings.board
         self.get_logger().info(
             f"{spec.squares[0]}x{spec.squares[1]} {spec.dictionary} board (markers from "
-            f"{spec.first_marker_id}), min_views {self._settings.min_views}; session folder "
+            f"{spec.first_marker_id}), min_views {self._settings.min_views}; corners from "
+            f"{'the model' if self._model is not None else 'OpenCV'}; session folder "
             f"{self._session_dir}; auto_replace "
             f"{'on: ' + str(self._config_path) if self._auto_replace else 'off'}")
+        if self._model is not None and self._camera is None:
+            self.get_logger().warning("the config has no CAMERA.K, so the distance readout is off")
 
     @property
     def session_dir(self) -> Path:
@@ -239,6 +274,7 @@ class CalibrateCam(Node):
             message = self._message if now < self._message_until else None
             capturing = self._pending is not None
             solving = self._solving or self._dirty
+            reading, reading_time = self._range, self._range_time
         session = self._session
         kept, rejected = session.kept_count, session.rejected_count
         active, dropped = session.active_count, session.dropped_count
@@ -253,13 +289,24 @@ class CalibrateCam(Node):
             message = "waiting for the image stream"
         elif message is None and now - frame_time > _STALL_S:
             message = f"stream stalled: no frame for {now - frame_time:.0f} s"
+        distance = None
+        if self._model is not None:
+            if self._camera is None:
+                distance = "no CAMERA.K"
+            elif self._model.square_length_m is None:
+                distance = "no BOARD.square_length_m"
+            elif reading is not None and now - reading_time <= _RANGE_HOLD_S:
+                distance = (reading.z, reading.range)
+            else:
+                distance = "no board"
         hud = HudState(kept=kept, rejected=rejected, min_views=self._settings.min_views,
                        status=status,
                        coverage_fraction=float(np.count_nonzero(coverage)) / coverage.size,
                        converged=converged,
                        verdict=None if review is None else review.verdict,
                        verdict_ok=None if review is None else review.kept,
-                       message=message)
+                       message=message, distance=distance,
+                       **({} if self._model is None else {"help": _HELP_DISTANCE}))
         return GuiState(frame=frame, canvas_size=stream_size or DEFAULT_CANVAS_SIZE, hud=hud,
                         coverage=coverage, review=review, capturing=capturing, solving=solving,
                         solution=solution)
@@ -279,6 +326,9 @@ class CalibrateCam(Node):
         with self._cond:
             self._closing = True
             self._cond.notify_all()
+        self._range_stop.set()
+        if self._range_worker_thread is not None:
+            self._range_worker_thread.join()
         self._worker.join()
         self._write_log()
 
@@ -387,6 +437,34 @@ class CalibrateCam(Node):
                 with self._cond:
                     self._solving = False
 
+    def _range_worker(self) -> None:
+        """Measure the board's distance on each new stream frame, at most every _RANGE_PERIOD_S."""
+        measured = None
+        while not self._range_stop.is_set():
+            started = time.monotonic()
+            with self._lock:
+                frame, frame_time = self._frame, self._frame_time
+            if frame is not None and frame_time != measured:
+                measured = frame_time
+                reading = None
+                try:
+                    K, dist = self._camera_at((int(frame.shape[1]), int(frame.shape[0])))
+                    reading = self._model.board_range(frame, K, dist)
+                except Exception as error:
+                    self.get_logger().error(f"distance readout: {error}",
+                                            throttle_duration_sec=5.0)
+                if reading is not None:
+                    with self._lock:
+                        self._range, self._range_time = reading, frame_time
+            self._range_stop.wait(max(0.0, _RANGE_PERIOD_S - (time.monotonic() - started)))
+
+    def _camera_at(self, size: tuple[int, int]) -> tuple[np.ndarray, np.ndarray]:
+        """Return the config's CAMERA K and dist for frames of size (W, H)."""
+        K, dist, camera_size = self._camera
+        if camera_size is not None and camera_size != size:
+            K = scale_intrinsics(K, camera_size, size)
+        return K, dist
+
     def _solve_and_write(self) -> None:
         """
         Solve, then write the config's CAMERA block (auto_replace) and the log.
@@ -489,12 +567,13 @@ def run_gui(node: CalibrateCam) -> None:
     if threading.current_thread() is not threading.main_thread():
         raise RuntimeError("run_gui must run on the main thread")
     show_coverage = True
+    show_distance = True
     was_visible = False
     screen, scale = screen_size(), None
     cv2.namedWindow(WINDOW_NAME, cv2.WINDOW_AUTOSIZE | cv2.WINDOW_GUI_NORMAL)
     try:
         while rclpy.ok():
-            canvas = _compose(node.state(), show_coverage)
+            canvas = _compose(node.state(), show_coverage, show_distance)
             if scale is None:
                 scale = fill_scale(canvas.shape[1], canvas.shape[0], screen)
             if scale != 1.0:
@@ -510,6 +589,8 @@ def run_gui(node: CalibrateCam) -> None:
                 node.undo()
             elif key in (ord("m"), ord("M")):
                 show_coverage = not show_coverage
+            elif key in (ord("d"), ord("D")):
+                show_distance = not show_distance
             visible = cv2.getWindowProperty(WINDOW_NAME, cv2.WND_PROP_VISIBLE) >= 1
             if was_visible and not visible:
                 break
@@ -554,7 +635,7 @@ def main(args: list[str] | None = None) -> None:
         rclpy.try_shutdown()
 
 
-def _compose(state: GuiState, show_coverage: bool) -> np.ndarray:
+def _compose(state: GuiState, show_coverage: bool, show_distance: bool = True) -> np.ndarray:
     """
     Return the window canvas: review mode while a capture's review is showing, else live mode.
     """
@@ -562,7 +643,23 @@ def _compose(state: GuiState, show_coverage: bool) -> np.ndarray:
     if review is not None:
         return compose_review(review.frame, review.corners, review.kept, state.hud,
                               state.canvas_size)
-    return compose_live(state.frame, state.hud, state.coverage, state.canvas_size, show_coverage)
+    hud = state.hud if show_distance else replace(state.hud, distance=None)
+    return compose_live(state.frame, hud, state.coverage, state.canvas_size, show_coverage)
+
+
+def _camera_from_cfg(cfg: dict) -> tuple[np.ndarray, np.ndarray, tuple[int, int] | None] | None:
+    """
+    Return the config's CAMERA block as (K, dist, image_size), None without a K.
+
+    A missing dist means none; a missing image_size means K is at the stream's resolution.
+    """
+    camera = cfg.get("CAMERA") or {}
+    if camera.get("K") is None:
+        return None
+    K = np.asarray(camera["K"], dtype=np.float64).reshape(3, 3)
+    dist = np.asarray(camera.get("dist") or [0.0] * 5, dtype=np.float64).ravel()
+    size = camera.get("image_size")
+    return K, dist, None if size is None else (int(size[0]), int(size[1]))
 
 
 def _spin(executor: MultiThreadedExecutor, stop: threading.Event) -> None:
