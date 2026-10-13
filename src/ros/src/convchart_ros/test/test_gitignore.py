@@ -40,3 +40,22 @@ def test_default_session_folder_is_ignored_by_the_repo_gitignore(name):
     source, _, pattern = result.stdout.partition('\t')[0].split(':', 2)
     assert source == '.gitignore' and not pattern.startswith('!'), \
         f'.gitignore does not ignore {path.relative_to(repo)} (git: {result.stdout.strip()})'
+
+
+SSL_FILES = ['frames.jsonl', 'harvest/train/chunk_0000/images.npy', 'rounds/round1/detector.onnx',
+             'report/dashboard.pdf']
+
+
+@pytest.mark.parametrize('name', SSL_FILES)
+def test_default_ssl_session_folder_is_ignored_by_the_repo_gitignore(name):
+    repo = find_repo()
+    git = shutil.which('git')
+    if repo is None or git is None:
+        pytest.skip('needs git and a git checkout of the repo')
+    path = repo / 'ssl_output' / SESSION / name
+    result = subprocess.run([git, '-C', str(repo), 'check-ignore', '--no-index', '--verbose',
+                             '--non-matching', str(path)], capture_output=True, text=True)
+    assert result.returncode in (0, 1), result.stderr
+    source, _, pattern = result.stdout.partition('\t')[0].split(':', 2)
+    assert source == '.gitignore' and not pattern.startswith('!'), \
+        f'.gitignore does not ignore {path.relative_to(repo)} (git: {result.stdout.strip()})'

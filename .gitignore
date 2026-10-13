@@ -3,4 +3,7 @@ trt_cache/
 src/ros/build/
 src/ros/install/
 src/ros/log/
+.env
 calibration_output/
+ssl_output/
+docs/KALMAN_COVARIANCE_HOWTO.md
