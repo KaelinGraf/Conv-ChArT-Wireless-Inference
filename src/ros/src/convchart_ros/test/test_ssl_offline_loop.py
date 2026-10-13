@@ -171,6 +171,27 @@ def test_a_resumed_loop_redoes_only_the_stage_cut_short(tmp_path):
     assert meta['resumes'][-1]['params']['max_rounds'] == 5 and meta['params']['max_rounds'] == 8
 
 
+def test_a_stop_ends_the_loop_without_an_exit_and_resume_retries_the_round(tmp_path):
+    class Stopped(Scripted):
+        def train_round(self, ps):
+            if not self.calls or self.calls[-1][0] != 'stopped':
+                self.calls.append(('stopped', ps['pass']))
+                self.stop()
+                return {'kind': 'round', 'round': 1, 'pass': ps['pass'],
+                        'error': 'RuntimeError: round stopped'}
+            return super().train_round(ps)
+
+    p, s = make_session(tmp_path)
+    assert Stopped(p, s, labelled=[1000], accepted=[False]).run() is None
+    assert [x['kind'] for x in jsonl(s / 'loop.jsonl')] == ['pass', 'round']
+    assert json.loads((s / 'status.json').read_text())['phase'] == 'stopped'
+    assert not (s / 'summary.json').exists()
+    p2, s2, _ = open_session(build_parser().parse_args(['--resume', str(s)]), tmp_path)
+    again = Scripted(p2, s2, labelled=[1000], accepted=[None, False], resumed=True)
+    out = again.run()
+    assert again.calls == [('round', 2, 1, p['teacher'])] and out['exit'] == 'gate_rejected'
+
+
 def key(img):
     return hashlib.sha1(np.ascontiguousarray(img).tobytes()).hexdigest()
 
