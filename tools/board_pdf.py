@@ -47,9 +47,9 @@ def page_content(cells: np.ndarray, square_mm: float) -> bytes:
     def Y(mm):
         return (H - mm) * PT_PER_MM
 
-    ops = ["0 g"]
-    for r, row in enumerate(cells):
-        c = 0
+    rects, open_runs = [], {}
+    for r, row in enumerate(np.vstack((cells, np.full((1, cells.shape[1]), 255, np.uint8)))):
+        runs, c = set(), 0
         while c < len(row):
             if row[c]:
                 c += 1
@@ -57,8 +57,16 @@ def page_content(cells: np.ndarray, square_mm: float) -> bytes:
             start = c
             while c < len(row) and not row[c]:
                 c += 1
-            ops.append(f"{X(x0 + start * cell):.3f} {Y(TOP_MM + (r + 1) * cell):.3f} "
-                       f"{(c - start) * cell * PT_PER_MM:.3f} {cell * PT_PER_MM:.3f} re f")
+            runs.add((start, c))
+        for run in [k for k in open_runs if k not in runs]:
+            rects.append((*run, open_runs.pop(run), r))
+        for run in runs - open_runs.keys():
+            open_runs[run] = r
+    ops = ["0 g"]
+    for c0, c1, r0, r1 in sorted(rects, key=lambda t: (t[2], t[0])):
+        ops.append(f"{X(x0 + c0 * cell):.3f} {Y(TOP_MM + r1 * cell):.3f} "
+                   f"{(c1 - c0) * cell * PT_PER_MM:.3f} {(r1 - r0) * cell * PT_PER_MM:.3f} re")
+    ops.append("f")
 
     ruler_y = TOP_MM + board_mm + 9
     ops.append("0 G 0.5 w")
