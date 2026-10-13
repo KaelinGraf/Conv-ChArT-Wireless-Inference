@@ -744,13 +744,14 @@ def test_run_gui_drives_the_node_from_the_keys(make_rig, monkeypatch):
 
     window = FakeWindow(keys())
     window.install(monkeypatch)
+    monkeypatch.setattr(calibrate, 'screen_size', lambda: (1000, 850))
     run_gui(node)
 
     assert steps == ['capture', 'coverage off', 'undo', 'quit']
-    assert window.created == [(calibrate.WINDOW_NAME, cv2.WINDOW_AUTOSIZE)]
+    assert window.created == [(calibrate.WINDOW_NAME, cv2.WINDOW_AUTOSIZE | cv2.WINDOW_GUI_NORMAL)]
     assert window.destroyed == [calibrate.WINDOW_NAME]
     assert window.off_main_thread == []
-    assert {shape for _, shape, _ in window.shown} == {(480, 640, 3)}, 'the window never resizes'
+    assert {shape for _, shape, _ in window.shown} == {(720, 960, 3)}, 'scaled to the screen, and never resized'
     assert all(dtype == np.uint8 for _, _, dtype in window.shown)
     assert review and set(review) == {(FULL_SHAPE, 'KEPT')}
     assert live[0] is True and live[-1] is False

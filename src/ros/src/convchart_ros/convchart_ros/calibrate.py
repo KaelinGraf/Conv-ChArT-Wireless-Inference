@@ -2,8 +2,9 @@
 Camera calibration node and GUI for the ChArUco calibration of the camera intrinsics.
 
 Live preview, human-triggered full-resolution captures, and a solve that is refined with every
-further kept view. CalibrateCam shows the 'image' stream and calls the 'capture' service for
-full-resolution stills. Each capture is checked at once (calib_session), saved in the session
+further kept view. CalibrateCam shows the 'image' stream and calls the camera's 'image_full_res'
+service (convchart_interfaces/GetFullResImage, served by the Pi's camera node) for full-resolution
+stills. Each capture is checked at once (calib_session), saved in the session
 folder and shown for review_s seconds. Once min_views views are kept, a background thread solves
 the calibration after every kept view, then writes the log and, with auto_replace, the config's
 CAMERA block. run_gui owns the OpenCV window on the main thread while a MultiThreadedExecutor
@@ -23,7 +24,7 @@ import threading
 import time
 import traceback
 
-from convchart_interfaces.srv import CaptureFrame
+from convchart_interfaces.srv import GetFullResImage
 from convchart_qos.qos import IMAGE_SUB_QOS
 import cv2
 import numpy as np
@@ -41,6 +42,7 @@ from .calib_utils.calib_session import (
     build_log, CalibrationSession, Detection, scale_intrinsics, settings_from_cfg, Solution,
     write_camera_to_cfg, write_log)
 from .calib_utils.calib_view import compose_live, compose_review, HudState
+from .screen import fill_scale, screen_size
 
 WINDOW_NAME = "calibrate"
 LOG_NAME = "calibration_log.yaml"
@@ -102,7 +104,7 @@ class CalibrateCam(Node):
     """Ingest camera frames to calibrate the camera intrinsics and distortion coefficients."""
 
     def __init__(self, cfg_pth: str = "", auto_replace: bool = False, output_dir: str = "",
-                 capture_timeout_s: float = 5.0):
+                 capture_timeout_s: float = 5.0, capture_max_age_s: float = 0.5):
         super().__init__("calibrate_cam_node")
         try:
             self._cfg_pth: str = str(self.declare_parameter("config", str(cfg_pth)).value)
@@ -114,6 +116,11 @@ class CalibrateCam(Node):
             self._capture_timeout_s = float(timeout)
             if not self._capture_timeout_s > 0:
                 raise ValueError(f"capture_timeout_s must be positive, got {timeout}")
+            max_age = self.declare_parameter("capture_max_age_s", float(capture_max_age_s),
+                                             ParameterDescriptor(dynamic_typing=True)).value
+            self._capture_max_age_s = float(max_age)
+            if not self._capture_max_age_s >= 0:
+                raise ValueError(f"capture_max_age_s must be >= 0, got {max_age}")
             if not self._cfg_pth:
                 raise ValueError("configuration path is not set (-p config:=<cfg.yaml>)")
             self._config_path = Path(os.path.abspath(self._cfg_pth))
@@ -159,7 +166,7 @@ class CalibrateCam(Node):
         self._vid_sub = self.create_subscription(CompressedImage, "image", self._video_stream,
                                                  IMAGE_SUB_QOS,
                                                  callback_group=self._video_cb_group)
-        self._capture_client = self.create_client(CaptureFrame, "capture",
+        self._capture_client = self.create_client(GetFullResImage, "image_full_res",
                                                   callback_group=self._calib_cb_group)
         self._timeout_timer = self.create_timer(_TIMEOUT_CHECK_S, self._check_timeout,
                                                 callback_group=self._calib_cb_group)
@@ -189,10 +196,11 @@ class CalibrateCam(Node):
             if self._closed or self._pending is not None or reviewing:
                 return False
             if not self._capture_client.service_is_ready():
-                self._set_message("capture service not available", now)
+                self._set_message("camera service image_full_res not available", now)
                 return False
             pending = _Pending(deadline=now + self._capture_timeout_s)
-            pending.future = self._capture_client.call_async(CaptureFrame.Request())
+            pending.future = self._capture_client.call_async(
+                GetFullResImage.Request(max_age=self._capture_max_age_s))
             self._pending = pending
             self._message = None
         pending.future.add_done_callback(functools.partial(self._on_capture_reply, pending))
@@ -335,7 +343,7 @@ class CalibrateCam(Node):
                     self._dirty = True
                     self._cond.notify_all()
 
-    def _record_capture(self, response: CaptureFrame.Response
+    def _record_capture(self, response: GetFullResImage.Response
                         ) -> tuple[np.ndarray | None, Detection | None, str | None]:
         """Decode, evaluate and submit one capture reply and save its PNG."""
         if not response.success:
@@ -482,10 +490,17 @@ def run_gui(node: CalibrateCam) -> None:
         raise RuntimeError("run_gui must run on the main thread")
     show_coverage = True
     was_visible = False
-    cv2.namedWindow(WINDOW_NAME, cv2.WINDOW_AUTOSIZE)
+    screen, scale = screen_size(), None
+    cv2.namedWindow(WINDOW_NAME, cv2.WINDOW_AUTOSIZE | cv2.WINDOW_GUI_NORMAL)
     try:
         while rclpy.ok():
-            cv2.imshow(WINDOW_NAME, _compose(node.state(), show_coverage))
+            canvas = _compose(node.state(), show_coverage)
+            if scale is None:
+                scale = fill_scale(canvas.shape[1], canvas.shape[0], screen)
+            if scale != 1.0:
+                canvas = cv2.resize(canvas, None, fx=scale, fy=scale,
+                                    interpolation=cv2.INTER_AREA if scale < 1 else cv2.INTER_LINEAR)
+            cv2.imshow(WINDOW_NAME, canvas)
             key = _key_code(cv2.waitKeyEx(_GUI_WAIT_MS))
             if key in _QUIT_KEYS:
                 break

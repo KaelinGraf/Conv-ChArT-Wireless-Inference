@@ -1,7 +1,10 @@
 # Camera calibration GUI: design
 
-Status: agreed 2026-10-05. The Pi camera node is deferred; `fake_camera` stands in for it during
-development and in tests. This file is the spec the implementation follows.
+Status: agreed 2026-10-05; updated 2026-10-10. This file is the spec the implementation follows.
+Update 2026-10-10: the Pi camera node (`p4p_camera`) exists and serves full-resolution stills as
+`image_full_res` (`GetFullResImage`), so `calibrate` and `fake_camera` use that service; the original
+`capture` (`CaptureFrame`) service was never served by the Pi. `fake_camera` stands in for the Pi
+camera during development and in tests.
 
 ## Goal
 
@@ -16,24 +19,24 @@ with every further capture, for as long as the user keeps going.
 |---|---|
 | frame selection | human-triggered stills over a service, not automatic selection from video |
 | preview | the `image` stream (640x480, the inference resolution) |
-| stills | `capture` service, full resolution: 1600x1200, the 4:3 crop of the sensor's 1600x1300 mode |
+| stills | `image_full_res` service, full resolution: 1600x1200, the 4:3 crop of the sensor's 1600x1300 mode |
 | solve resolution | full resolution; `K` is then scaled to the stream resolution for inference |
 | board | user-configurable (squares, sizes, dictionary, first marker id, legacy pattern); defaults = Conv-ChArT's `dcc` board |
 | `auto_replace` | `True`: `K`, `dist`, `image_size` (at stream resolution) are written into the config's `CAMERA` block after every successful solve, after a one-time backup of the config. `False`: config untouched |
 | log file | always written, in both modes, after every solve and on exit |
 | coverage map | shown over the live view (toggle `M`) |
-| Pi camera node | deferred; `fake_camera` implements the same `image` + `capture` interface |
+| Pi camera node | `p4p_camera`; `fake_camera` implements the same `image` + `image_full_res` interface |
 
 ## Components
 
 | file | owner layer | role |
 |---|---|---|
-| `convchart_interfaces/srv/CaptureFrame.srv` | interface | full-res still on request |
+| `convchart_interfaces/srv/GetFullResImage.srv` | interface | full-res still on request, shared with `p4p_camera` |
 | `convchart_ros/calib_utils/calib_board.py` | pure | `BoardSpec`, `board_spec_from_cfg`, `make_board` |
 | `convchart_ros/calib_utils/calib_session.py` | pure (no ROS, no GUI) | detection + usability, kept views, solve, coverage, intrinsics scaling, config + log writing |
 | `convchart_ros/calib_utils/calib_view.py` | pure (no ROS) | composes the window canvas: live / review modes, overlays, HUD, coverage map |
 | `convchart_ros/calib_utils/calib_synth.py` | pure | synthetic ChArUco renders from a known camera (fake camera + tests) |
-| `convchart_ros/calib_utils/fake_camera.py` | ROS node | serves `image` and `capture` from synthetic renders |
+| `convchart_ros/calib_utils/fake_camera.py` | ROS node | serves `image` and `image_full_res` from synthetic renders |
 | `convchart_ros/calibrate.py` | ROS node + GUI | `CalibrateCam` node, `run_gui`, `main` |
 | `cfg/cfg.yaml` | config | `CALIBRATION` block (all keys optional) |
 
@@ -41,20 +44,21 @@ All paths under `src/ros/src/` unless they start with `cfg/` or `docs/`.
 
 ## Interfaces
 
-`CaptureFrame.srv`:
+`GetFullResImage.srv` (defined with `p4p_camera`; see its comments for the full contract):
 
 ```
-# Request one full-resolution frame, captured after the request arrives.
+float32 max_age                     # refuse a retained frame older than this (s); 0 accepts any
 ---
 bool success
-string message
+string message                      # why not, when success is false
+builtin_interfaces/Time capture_stamp
 sensor_msgs/CompressedImage image   # PNG, mono8, full resolution
 ```
 
 | name | type | notes |
 |---|---|---|
 | `image` | `sensor_msgs/CompressedImage` | preview / inference stream, PNG mono8. QoS: RELIABLE, VOLATILE, KEEP_LAST 1 |
-| `capture` | `convchart_interfaces/srv/CaptureFrame` | full-res still of a frame captured after the request |
+| `image_full_res` | `convchart_interfaces/srv/GetFullResImage` | the camera's newest full-res frame; `calibrate` sends `max_age = capture_max_age_s` (0.5 s) so a stopped camera's last frame is refused |
 
 ## Configuration (`cfg/cfg.yaml`)
 
@@ -240,7 +244,7 @@ def blank_frame(size, seed=0) -> np.ndarray
 - Poses cover a 3x3 grid of image regions, near and far, tilts of about 15-40 degrees about both board
   axes and +-20 degrees in-plane, with the whole board inside the frame.
 - `FakeCamera(Node)`: publishes `image` (current pose rendered at full res, `INTER_AREA` to the stream
-  size, PNG) at `rate_hz`; serves `capture` (current pose at full res, fresh noise), then advances to
+  size, PNG) at `rate_hz`; serves `image_full_res` (current pose at full res, fresh noise), then advances to
   the next pose (cycling). Options: `blank_every` (every Nth capture is blank), `reply_delay_s`.
   Exposes `K_full`, `dist`, `poses`. Board from an optional config's `CALIBRATION.board`.
 
@@ -249,7 +253,7 @@ def blank_frame(size, seed=0) -> np.ndarray
 ```python
 class CalibrateCam(Node):
     def __init__(self, cfg_pth: str = "", auto_replace: bool = False, output_dir: str = "",
-                 capture_timeout_s: float = 5.0): ...
+                 capture_timeout_s: float = 5.0, capture_max_age_s: float = 0.5): ...
     def request_capture(self) -> bool       # False while a request is in flight or a review is showing
     def undo(self) -> bool
     def state(self) -> GuiState             # snapshot for the GUI loop
@@ -259,9 +263,9 @@ def main(args=None) -> None
 ```
 
 - Constructor args are the defaults of the ROS parameters `config`, `auto_replace`, `output_dir`,
-  `capture_timeout_s`; parameters win. Loads the config with `yaml.safe_load`. `main()` needs
+  `capture_timeout_s`, `capture_max_age_s`; parameters win. Loads the config with `yaml.safe_load`. `main()` needs
   `-p config:=<cfg.yaml>`; a bad config or parameter ends it with one line, `calibrate: <reason>`.
-- Subscribes to `image` (callback group "video"); the `capture` client uses callback group "calib".
+- Subscribes to `image` (callback group "video"); the `image_full_res` client uses callback group "calib".
 - Capture flow: `request_capture` -> `call_async`; on the response, decode the PNG, `evaluate`, `submit`,
   save the PNG (`frames/view_NNN.png` or `frames/rejected_NNN.png`), start a review of `review_s`
   seconds, and queue a solve when `ready`. A timeout cancels the request and shows a message.
@@ -325,6 +329,7 @@ history: [{n_views, rms_px, fx, fy, cx, cy}]
 | `test/test_calib_view.py` | canvas size constant across modes and input sizes, overlay pixels where `scale_points` says, `scale_points` exact, coverage fill, HUD drawn |
 | `test/test_calib_synth.py` | detected corners on renders match the projected ground truth (< 0.3 px median), poses keep the board in frame |
 | `test/test_fake_camera.py` | stream at stream size, capture at full size, captures advance poses, `blank_every`, `reply_delay_s` |
+| `test/test_calibrate_pi_camera.py` | captures through the Pi's own camera node (mock backend): kept at full resolution, a frame older than `capture_max_age_s` refused |
 | `test/test_calibrate_node.py` | headless end to end with `fake_camera`: K/dist recovered, log written in both modes, `auto_replace` writes scaled `CAMERA` + backup and `False` leaves the config untouched, capture timeout handled without hanging, ROS parameters, a capture during a solve queues one more solve |
 | `test/test_gitignore.py` | `calibration_output/` stays out of git |
 

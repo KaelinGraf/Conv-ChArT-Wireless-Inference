@@ -1,7 +1,7 @@
 """
 Tests for the fake camera node (fake_camera.py) over ROS 2.
 
-FakeCamera runs in-process beside a probe node that subscribes to 'image' and calls 'capture', all
+FakeCamera runs in-process beside a probe node that subscribes to 'image' and calls 'image_full_res', all
 on an isolated domain with discovery limited to localhost and a private namespace, so nothing here
 can reach a real robot or another test run; main() runs as a subprocess under the same isolation.
 Captures are checked against the camera's own ground truth (K_full, dist, poses) with OpenCV's
@@ -16,7 +16,7 @@ import sys
 import threading
 import time
 
-from convchart_interfaces.srv import CaptureFrame
+from convchart_interfaces.srv import GetFullResImage
 import convchart_ros
 from convchart_ros.calib_utils.calib_board import BoardSpec, make_board
 from convchart_ros.calib_utils.calib_session import charuco_offset_px
@@ -50,7 +50,7 @@ STREAM_QOS = QoSProfile(history=QoSHistoryPolicy.KEEP_LAST, depth=1,
                         reliability=QoSReliabilityPolicy.RELIABLE,
                         durability=QoSDurabilityPolicy.VOLATILE)
 INFERENCE_QOS = QoSProfile(history=QoSHistoryPolicy.KEEP_LAST, depth=1,
-                           reliability=QoSReliabilityPolicy.RELIABLE,
+                           reliability=QoSReliabilityPolicy.BEST_EFFORT,
                            durability=QoSDurabilityPolicy.VOLATILE,
                            deadline=Duration(seconds=0.2),
                            lifespan=Duration(seconds=0.15),
@@ -75,7 +75,7 @@ class Rig:
         self.frames = []
         self.probe.create_subscription(CompressedImage, prefix + 'image', self._on_frame,
                                        STREAM_QOS)
-        self.client = self.probe.create_client(CaptureFrame, prefix + 'capture')
+        self.client = self.probe.create_client(GetFullResImage, prefix + 'image_full_res')
         self.executor = MultiThreadedExecutor(num_threads=4)
         self.executor.add_node(self.probe)
         if camera is not None:
@@ -92,10 +92,10 @@ class Rig:
         return self.frames[-1][1]
 
     def capture(self):
-        """Call 'capture' once; return the reply and the call's (start, end) monotonic times."""
-        assert self.client.wait_for_service(timeout_sec=TIMEOUT_S), "no 'capture' service"
+        """Call 'image_full_res' once; return the reply and the call's (start, end) monotonic times."""
+        assert self.client.wait_for_service(timeout_sec=TIMEOUT_S), "no 'image_full_res' service"
         start = time.monotonic()
-        future = self.client.call_async(CaptureFrame.Request())
+        future = self.client.call_async(GetFullResImage.Request(max_age=0.5))
         wait_until(future.done, 'a capture reply')
         return future.result(), (start, time.monotonic())
 
@@ -218,6 +218,7 @@ def test_capture_returns_a_full_resolution_png_of_the_current_pose(make_rig):
     rig = make_rig()
     response, _ = rig.capture()
     assert response.success
+    assert response.capture_stamp == response.image.header.stamp
     frame = decode(response.image)
     assert frame.shape == FULL_SHAPE
     assert pose_error(rig.camera, frame, 0) < 0.3

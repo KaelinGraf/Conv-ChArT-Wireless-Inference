@@ -1,7 +1,8 @@
 """
-Fake camera node: the Pi camera's 'image' stream and 'capture' service, served from synthetic renders.
+Fake camera node: the Pi camera's 'image' stream and 'image_full_res' service, served from synthetic
+renders.
 
-It stands in for the (deferred) Pi camera node during development and in tests. The board steps through
+It stands in for the Pi camera node (p4p_camera) during development and in tests. The board steps through
 calib_synth.diverse_poses: the stream shows the current pose, and each capture returns the current pose at
 full resolution with fresh noise, then moves on to the next pose. The ground truth a calibration should
 recover (K_full, dist) and the poses are exposed as attributes.
@@ -16,7 +17,7 @@ import time
 from typing import Any
 
 from builtin_interfaces.msg import Time
-from convchart_interfaces.srv import CaptureFrame
+from convchart_interfaces.srv import GetFullResImage
 import cv2
 import numpy as np
 from numpy.typing import ArrayLike
@@ -50,8 +51,8 @@ _CAPTURE_SEED = 1_000_000
 
 
 class FakeCamera(Node):
-    """Synthetic camera serving 'image' (preview stream) and 'capture' (full-resolution
-    CaptureFrame stills).
+    """Synthetic camera serving 'image' (preview stream) and 'image_full_res' (full-resolution
+    GetFullResImage stills).
     """
 
     def __init__(self, board_spec: BoardSpec = BoardSpec(), K_full: ArrayLike = DEFAULT_K_FULL,
@@ -87,7 +88,7 @@ class FakeCamera(Node):
         self._image_pub = self.create_publisher(CompressedImage, "image", IMAGE_QOS,
                                                 callback_group=stream_group)
         self._timer = self.create_timer(1.0 / rate_hz, self._publish_frame, callback_group=stream_group)
-        self._capture_srv = self.create_service(CaptureFrame, "capture", self._capture,
+        self._capture_srv = self.create_service(GetFullResImage, "image_full_res", self._capture,
                                                 callback_group=capture_group)
         cols, rows = board_spec.squares
         self.get_logger().info(
@@ -118,11 +119,11 @@ class FakeCamera(Node):
                 self._stream_png = cached
         self._image_pub.publish(self._message(cached[1], self.get_clock().now().to_msg()))
 
-    def _capture(self, request: CaptureFrame.Request,
-                 response: CaptureFrame.Response) -> CaptureFrame.Response:
+    def _capture(self, request: GetFullResImage.Request,
+                 response: GetFullResImage.Response) -> GetFullResImage.Response:
         """
-        'capture' service: a full-resolution still of the current pose taken after the request (and after
-        reply_delay_s), then the next pose.
+        'image_full_res' service: a full-resolution still of the current pose taken after the request (and
+        after reply_delay_s), then the next pose. Rendered fresh for each request, so any max_age is met.
         """
         if self._reply_delay_s > 0:
             time.sleep(self._reply_delay_s)
@@ -134,6 +135,7 @@ class FakeCamera(Node):
         seed = _CAPTURE_SEED + count
         frame = blank_frame(self.full_size, seed=seed) if blank else self._render(index, seed=seed)
         response.image = self._message(_png(frame), stamp)
+        response.capture_stamp = stamp
         response.success = True
         shown = "blank frame" if blank else f"pose {index + 1}/{len(self.poses)}"
         response.message = f"fake capture {count}: {shown}"
