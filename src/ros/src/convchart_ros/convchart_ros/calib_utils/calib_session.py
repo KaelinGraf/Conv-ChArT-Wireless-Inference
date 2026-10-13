@@ -12,6 +12,7 @@ from functools import lru_cache
 import math
 import os
 from pathlib import Path
+import re
 import shutil
 import threading
 from typing import Any, Callable
@@ -32,6 +33,8 @@ _CFG_KEYS = {"board", "min_corners", "min_views", "review_s", "outlier_factor", 
              "coverage_grid", "converge_rel_sigma_f", "converge_sigma_c_px"}
 _STD_KEYS = ("fx", "fy", "cx", "cy", "k1", "k2", "p1", "p2", "k3")
 _VIEW_FILE = "frames/view_{:03d}.png"
+_LOG_FILE = "calibration_log.yaml"
+_FRAME_FILE = re.compile(r"(view|rejected|undone)_(\d+)\.png")
 
 
 @dataclass(frozen=True)
@@ -194,7 +197,8 @@ class CalibrationSession:
                          obj_points.reshape(-1, 3).astype(np.float32),
                          img_points.reshape(-1, 2).astype(np.float32))
 
-    def submit(self, det: Detection) -> int | None:
+    def submit(self, det: Detection, index: int | None = None,
+               dropped: bool = False) -> int | None:
         """Record an evaluated capture; return the new view's index, or None for a rejected
         capture.
         """
@@ -215,11 +219,32 @@ class CalibrationSession:
             if self._views and self._views[0].image_size != size:
                 raise ValueError(f"view image size {size} differs from the session's "
                                  f"{self._views[0].image_size}")
-            view = _View(self._next_index, obj_points, img_points, corners, size)
+            if index is None:
+                index = self._next_index
+            elif index < self._next_index:
+                raise ValueError(f"view index {index} is already used (the next free one is "
+                                 f"{self._next_index})")
+            view = _View(int(index), obj_points, img_points, corners, size, dropped=bool(dropped))
             self._views.append(view)
-            self._next_index += 1
+            self._next_index = view.index + 1
             self._last_size = size
             return view.index
+
+    def carry_over(self, rejected: int = 0, next_index: int = 0,
+                   history: list[dict[str, Any]] | None = None) -> None:
+        """Take on what an earlier session counted, when resuming it. @args: rejected: its rejected
+        captures, added to the count. next_index: the first view index it never used; later
+        views are numbered from here (or from above the views already restored, whichever is
+        higher). history: its solves as the log lists them ({n_views, rms_px, fx, fy, cx, cy}),
+        put before this session's own.
+        """
+        earlier = [{"n_views": int(entry["n_views"]), "rms": float(entry["rms_px"]),
+                    **{key: float(entry[key]) for key in ("fx", "fy", "cx", "cy")}}
+                   for entry in history or []]
+        with self._lock:
+            self._rejected += int(rejected)
+            self._next_index = max(self._next_index, int(next_index))
+            self._history[:0] = earlier
 
     def undo(self) -> int | None:
         """
@@ -392,6 +417,62 @@ def scale_intrinsics(K: np.ndarray, full_size: tuple[int, int],
     return scaled
 
 
+@dataclass(frozen=True)
+class SavedSession:
+    """What an earlier session left in its folder, read to resume it (read_saved_session). @args:
+    folder: the session folder. views: (index, file, dropped) of its kept views, by index: file
+    relative to folder, dropped as its log says (False without a log). rejected: its rejected
+    captures, from the numbering of frames/rejected_NNN.png. next_index: the first view index it
+    never used: above its views, its undone views and the views its log lists. log: its
+    calibration_log.yaml, None when it has none.
+    """
+    folder: Path
+    views: list[tuple[int, str, bool]]
+    rejected: int
+    next_index: int
+    log: dict[str, Any] | None
+
+
+def read_saved_session(folder: str | os.PathLike) -> SavedSession:
+    """Read what an earlier session left in folder, to resume it."""
+    folder = Path(folder)
+    if not (folder / "frames").is_dir():
+        raise ValueError(f"{folder} is not a calibration session folder (no frames/)")
+    log = None
+    if (folder / _LOG_FILE).is_file():
+        try:
+            log = yaml.safe_load((folder / _LOG_FILE).read_text())
+        except yaml.YAMLError as error:
+            raise ValueError(f"cannot read {folder / _LOG_FILE}: {error}") from None
+        if not isinstance(log, dict):
+            raise ValueError(f"{folder / _LOG_FILE} is not a calibration log")
+    files: dict[str, dict[int, str]] = {"view": {}, "rejected": {}, "undone": {}}
+    for path in (folder / "frames").iterdir():
+        match = _FRAME_FILE.fullmatch(path.name)
+        if match:
+            files[match.group(1)][int(match.group(2))] = f"frames/{path.name}"
+    logged = [entry for entry in (log or {}).get("views") or [] if isinstance(entry, dict)]
+    dropped = {int(entry["index"]) for entry in logged if entry.get("dropped")}
+    used = set(files["view"]) | set(files["undone"]) | {int(entry["index"]) for entry in logged}
+    return SavedSession(
+        folder=folder,
+        views=[(index, files["view"][index], index in dropped) for index in sorted(files["view"])],
+        rejected=max(files["rejected"]) + 1 if files["rejected"] else 0,
+        next_index=max(used) + 1 if used else 0,
+        log=log)
+
+
+def latest_saved_session(root: str | os.PathLike) -> Path | None:
+    """Return the newest session folder under root that holds a kept view, None if there is none.
+    """
+    root = Path(root)
+    if not root.is_dir():
+        return None
+    sessions = [path for path in root.iterdir()
+                if (path / "frames").is_dir() and any((path / "frames").glob("view_*.png"))]
+    return max(sessions, key=lambda path: path.name) if sessions else None
+
+
 def build_log(session: CalibrationSession, settings: CalibrationSettings,
               meta: dict[str, Any] | None) -> dict[str, Any]:
     """Build the calibration log document (plain Python types, ready for write_log)."""
@@ -437,6 +518,8 @@ def build_log(session: CalibrationSession, settings: CalibrationSettings,
             "auto_replace": bool(meta.get("auto_replace", False)),
             "config_written": bool(meta.get("config_written", False)),
             "config_backup": _optional_str(meta.get("config_backup")),
+            "detector": _optional_str(meta.get("detector")),
+            "resumed": [dict(entry) for entry in meta.get("resumed") or []],
         },
         "board": {
             "squares": [int(v) for v in spec.squares],

@@ -12,8 +12,8 @@ import threading
 from convchart_ros.calib_utils.calib_board import BoardSpec, make_board
 from convchart_ros.calib_utils.calib_session import (
     build_log, CalibrationSession, CalibrationSettings, charuco_offset_px, Detection,
-    REJECT_COLLINEAR, REJECT_NO_BOARD, scale_intrinsics, settings_from_cfg, write_camera_to_cfg,
-    write_log)
+    latest_saved_session, read_saved_session, REJECT_COLLINEAR, REJECT_NO_BOARD,
+    scale_intrinsics, settings_from_cfg, write_camera_to_cfg, write_log)
 import cv2
 import numpy as np
 import pytest
@@ -431,6 +431,93 @@ def test_submit_undo_and_counts():
     assert (session.kept_count, session.rejected_count, session.active_count) == (0, 2, 0)
 
 
+def test_submit_restores_views_under_their_own_indices():
+    views = synthetic_views(4, seed=21)
+    session = CalibrationSession(CalibrationSettings(min_views=2))
+    assert session.submit(views[0], index=3) == 3
+    with pytest.raises(ValueError, match='view index 2 is already used'):
+        session.submit(views[1], index=2)
+    assert session.submit(views[1]) == 4, 'numbering carries on after a restored view'
+    assert session.submit(views[2], index=7, dropped=True) == 7
+    assert (session.kept_count, session.active_count, session.dropped_count) == (3, 2, 1)
+    assert session.solve().per_view_errors.keys() == {3, 4}, 'a restored dropped view stays out'
+    assert session.submit(rejected(), index=9) is None and session.rejected_count == 1
+    assert session.submit(views[3]) == 8, 'a rejected capture takes no index'
+
+
+def test_carry_over_takes_on_an_earlier_sessions_counts_and_history():
+    session = CalibrationSession(CalibrationSettings(min_views=12))
+    earlier = [{'n_views': 12, 'rms_px': 0.13, 'fx': 933.2, 'fy': 934.4, 'cx': 814.7, 'cy': 578.0}]
+    session.carry_over(rejected=3, next_index=24, history=earlier)
+    assert session.rejected_count == 3 and session.kept_count == 0
+    views = synthetic_views(12, seed=22)
+    assert [session.submit(view) for view in views] == list(range(24, 36))
+    session.carry_over(next_index=5)
+    assert session.submit(synthetic_views(1, seed=23)[0]) == 36, 'never back below a used index'
+    solution = session.solve()
+    history = session.history
+    assert history[0] == {'n_views': 12, 'rms': 0.13, 'fx': 933.2, 'fy': 934.4, 'cx': 814.7,
+                          'cy': 578.0}
+    assert len(history) == 2 and history[1]['rms'] == solution.rms
+    log = build_log(session, CalibrationSettings(), {})
+    assert log['counts']['rejected'] == 3
+    assert log['history'][0] == earlier[0]
+
+
+def saved_session(folder, names, log=None):
+    """Lay out a session folder: empty files under frames/, and log as calibration_log.yaml."""
+    (folder / 'frames').mkdir(parents=True)
+    for name in names:
+        (folder / 'frames' / name).write_bytes(b'')
+    if log is not None:
+        (folder / 'calibration_log.yaml').write_text(yaml.safe_dump(log))
+    return folder
+
+
+def test_read_saved_session_takes_the_views_from_the_frames_and_drops_from_the_log(tmp_path):
+    names = ['view_000.png', 'view_001.png', 'undone_002.png', 'view_003.png', 'rejected_000.png',
+             'rejected_001.png', 'undone_005.png', 'notes.txt', 'view_old.png']
+    log = {'session': {'started': '2026-10-13T22:54:44+00:00'},
+           'views': [{'index': i, 'dropped': i == 1} for i in (0, 1, 3)]}
+    saved = read_saved_session(saved_session(tmp_path / 'a', names, log))
+    assert saved.folder == tmp_path / 'a'
+    assert saved.views == [(0, 'frames/view_000.png', False), (1, 'frames/view_001.png', True),
+                           (3, 'frames/view_003.png', False)]
+    assert saved.rejected == 2
+    assert saved.next_index == 6, 'above the undone views too'
+    assert saved.log['session']['started'] == '2026-10-13T22:54:44+00:00'
+    bare = read_saved_session(saved_session(tmp_path / 'b', names))
+    assert bare.log is None and [dropped for _, _, dropped in bare.views] == [False] * 3
+    ahead = read_saved_session(saved_session(tmp_path / 'c', ['view_000.png'],
+                                             {'views': [{'index': 8, 'dropped': False}]}))
+    assert ahead.views == [(0, 'frames/view_000.png', False)] and ahead.next_index == 9
+    empty = read_saved_session(saved_session(tmp_path / 'd', []))
+    assert (empty.views, empty.rejected, empty.next_index) == ([], 0, 0)
+
+
+def test_read_saved_session_refuses_what_is_not_a_session(tmp_path):
+    with pytest.raises(ValueError, match='not a calibration session folder'):
+        read_saved_session(tmp_path)
+    folder = saved_session(tmp_path / 's', ['view_000.png'])
+    (folder / 'calibration_log.yaml').write_text('views: [unclosed\n')
+    with pytest.raises(ValueError, match='cannot read'):
+        read_saved_session(folder)
+    (folder / 'calibration_log.yaml').write_text('- a list\n')
+    with pytest.raises(ValueError, match='is not a calibration log'):
+        read_saved_session(folder)
+
+
+def test_latest_saved_session_is_the_newest_folder_holding_a_kept_view(tmp_path):
+    assert latest_saved_session(tmp_path / 'missing') is None
+    assert latest_saved_session(tmp_path) is None
+    saved_session(tmp_path / '20261013-020557', ['view_000.png'])
+    saved_session(tmp_path / '20261013-225444', ['view_000.png', 'rejected_000.png'])
+    saved_session(tmp_path / '20261014-080000', ['rejected_000.png'])
+    (tmp_path / '20261020-combined').mkdir()
+    (tmp_path / 'notes.txt').write_text('')
+    assert latest_saved_session(tmp_path) == tmp_path / '20261013-225444'
+
+
 def test_submit_rejects_a_second_image_size():
     session = CalibrationSession(CalibrationSettings())
     session.submit(synthetic_views(1, seed=7)[0])
@@ -734,15 +821,19 @@ def test_build_log_reports_the_session(tmp_path):
     session.submit(rejected('corners in a line'))
     solution = session.solve()
     assert solution.dropped == [bad]
+    resumed = [{'at': '2026-10-06T09:00:00', 'detector': 'model', 'views_restored': 12,
+                'views_now_rejected': 0}]
     meta = {'started': '2026-10-05T16:19:00', 'config': '/cfg/cfg.yaml', 'auto_replace': True,
-            'config_written': True, 'config_backup': '/cfg/cfg.yaml.bak', 'stream_size': STREAM}
+            'config_written': True, 'config_backup': '/cfg/cfg.yaml.bak', 'detector': 'model',
+            'resumed': resumed, 'stream_size': STREAM}
 
     log = build_log(session, settings, meta)
     assert list(log) == ['session', 'board', 'images', 'counts', 'coverage_fraction', 'solution',
                          'views', 'history']
     assert log['session'] == {'started': '2026-10-05T16:19:00', 'config': '/cfg/cfg.yaml',
                               'auto_replace': True, 'config_written': True,
-                              'config_backup': '/cfg/cfg.yaml.bak'}
+                              'config_backup': '/cfg/cfg.yaml.bak', 'detector': 'model',
+                              'resumed': resumed}
     assert log['board'] == {'squares': [5, 5], 'square_length_m': 1.0, 'marker_length_m': 0.7,
                             'dictionary': 'DICT_5X5_50', 'first_marker_id': 0,
                             'legacy_pattern': False}
@@ -793,7 +884,8 @@ def test_build_log_before_any_solve_and_without_a_stream():
     assert log['coverage_fraction'] == 0.0
     assert log['board']['marker_length_m'] == 0.6
     assert log['session'] == {'started': None, 'config': None, 'auto_replace': False,
-                              'config_written': False, 'config_backup': None}
+                              'config_written': False, 'config_backup': None, 'detector': None,
+                              'resumed': []}
     session.submit(rejected())
     assert build_log(session, settings, {})['images']['full_size'] == [1600, 1200]
 
