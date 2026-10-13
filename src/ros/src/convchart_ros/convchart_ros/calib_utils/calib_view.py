@@ -21,6 +21,8 @@ _REF_SIZE = (640, 480)
 _FONT = cv2.FONT_HERSHEY_SIMPLEX
 _TEXT_SCALE = 0.5
 _VERDICT_SCALE = 0.8
+_DISTANCE_SCALE = 1.6
+_RANGE_SCALE = 0.8
 _PAD = 6
 _BAND_ALPHA = 0.7
 _VERDICT_ALPHA = 0.8
@@ -39,6 +41,7 @@ _GREEN: _Colour = (0, 255, 0)
 _RED: _Colour = (0, 0, 255)
 _CONVERGED: _Colour = (110, 255, 110)
 _MESSAGE: _Colour = (70, 70, 255)
+_NO_BOARD: _Colour = (0, 200, 255)
 _VERDICT_KEPT: _Colour = (0, 140, 0)
 _VERDICT_REJECTED: _Colour = (0, 0, 190)
 
@@ -53,7 +56,10 @@ class HudState:
     status line turns green. verdict: review only, "KEPT" or "REJECTED: <reason>"; None shows
     "KEPT" or "REJECTED" according to kept. verdict_ok: verdict banner colour, True green and
     False red; None follows kept. message: transient error shown in red, e.g. "capture timed
-    out"; None shows nothing. help: key help line.
+    out"; None shows nothing. help: key help line. distance: live only, the board's distance
+    from the camera for setting the focus: (z, range) in metres, drawn large at the top right
+    under the top band; a str such as "no board" stands in for the numbers; None shows no
+    readout.
     """
     kept: int
     rejected: int
@@ -65,6 +71,7 @@ class HudState:
     verdict_ok: bool | None = None
     message: str | None = None
     help: str = "SPACE capture   U undo   M coverage   Q quit"
+    distance: tuple[float, float] | str | None = None
 
 
 def scale_points(points: ArrayLike, src_size: tuple[int, int],
@@ -82,14 +89,16 @@ def scale_points(points: ArrayLike, src_size: tuple[int, int],
 def compose_live(frame: np.ndarray | None, hud: HudState, coverage: np.ndarray | None = None,
                  canvas_size: tuple[int, int] = (640, 480),
                  show_coverage: bool = True) -> np.ndarray:
-    """Live-mode canvas: the latest stream frame under the coverage map and the HUD. @args: frame:
-    stream frame, mono (H, W) or (H, W, 1), or BGR (H, W, 3), any size; it is resized to the
-    canvas (INTER_AREA).
+    """Live-mode canvas: the latest stream frame under the coverage map, the HUD and the distance.
+    @args: frame: stream frame, mono (H, W) or (H, W, 1), or BGR (H, W, 3), any size; it is
+    resized to the canvas (INTER_AREA).
     """
     canvas = _frame_canvas(frame, _size(canvas_size, "canvas_size"))
     if show_coverage and coverage is not None:
         _draw_coverage(canvas, coverage)
-    _draw_hud(canvas, hud)
+    below_top = _draw_hud(canvas, hud)
+    if hud.distance is not None:
+        _draw_distance(canvas, hud.distance, below_top)
     return canvas
 
 
@@ -202,8 +211,8 @@ def _draw_markers(canvas: np.ndarray, points: np.ndarray, colour: _Colour) -> No
             cv2.circle(canvas, centre, int(round(r * one)), c, -1, cv2.LINE_AA, _SHIFT)
 
 
-def _draw_hud(canvas: np.ndarray, hud: HudState, banner: tuple[str, bool] | None = None) -> None:
-    """Draw the HUD onto canvas in place."""
+def _draw_hud(canvas: np.ndarray, hud: HudState, banner: tuple[str, bool] | None = None) -> int:
+    """Draw the HUD onto canvas in place; return the row just below the top band."""
     h, w = canvas.shape[:2]
     ui = _ui_scale(canvas)
     pad = max(1, round(_PAD * ui))
@@ -231,6 +240,35 @@ def _draw_hud(canvas: np.ndarray, hud: HudState, banner: tuple[str, bool] | None
     bottom += [(line, _LIGHT_GREY) for line in _wrap(hud.help, width, body, 1)]
     _text_band(canvas, h - _band_height(len(bottom), body, pad), bottom, body, pad, _BLACK,
                _BAND_ALPHA)
+    return y
+
+
+def _draw_distance(canvas: np.ndarray, distance: tuple[float, float] | str, y0: int) -> None:
+    """Draw the distance readout onto canvas in place: a dark box at the top right from row y0."""
+    w = canvas.shape[1]
+    ui = _ui_scale(canvas)
+    pad = max(1, round(_PAD * ui))
+    big = _Font(_DISTANCE_SCALE * ui, max(1, round(3 * ui)))
+    small = _Font(_RANGE_SCALE * ui, max(1, round(2 * ui)))
+    if isinstance(distance, str):
+        lines = [(distance, big, _NO_BOARD)]
+    else:
+        z, straight = distance
+        lines = [(f"z {z:.2f} m", big, _WHITE), (f"range {straight:.2f} m", small, _LIGHT_GREY)]
+    text_w = max(font.width(text) for text, font, _ in lines)
+    box_w = min(w, text_w + 2 * pad)
+    x0 = w - box_w
+    heights = [sum(font.metrics()[:2]) for _, font, _ in lines]
+    gap = big.metrics()[2]
+    y1 = y0 + 2 * pad + sum(heights) + gap * (len(lines) - 1)
+    _blend(canvas[max(0, y0):y1, x0:], _BLACK, _BAND_ALPHA)
+    y = y0 + pad
+    for (text, font, colour), height in zip(lines, heights):
+        ascent = font.metrics()[0]
+        x = w - pad - font.width(text)
+        cv2.putText(canvas, text, (max(0, x), y + ascent), _FONT, font.scale, colour,
+                    font.thickness, cv2.LINE_AA)
+        y += height + gap
 
 
 def _band_height(n_lines: int, font: _Font, pad: int) -> int:

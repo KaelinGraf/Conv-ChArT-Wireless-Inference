@@ -70,10 +70,11 @@ def band_rows(canvas):
 def test_hud_state_fields_and_defaults():
     names = [field.name for field in dataclasses.fields(HudState)]
     assert names == ['kept', 'rejected', 'min_views', 'status', 'coverage_fraction', 'converged',
-                     'verdict', 'verdict_ok', 'message', 'help']
+                     'verdict', 'verdict_ok', 'message', 'help', 'distance']
     hud = HudState(5, 2, 12, 'collecting 5/12')
-    defaults = (hud.coverage_fraction, hud.converged, hud.verdict, hud.verdict_ok, hud.message)
-    assert defaults == (None, False, None, None, None)
+    defaults = (hud.coverage_fraction, hud.converged, hud.verdict, hud.verdict_ok, hud.message,
+                hud.distance)
+    assert defaults == (None, False, None, None, None, None)
     assert hud.help == 'SPACE capture   U undo   M coverage   Q quit'
 
 
@@ -371,6 +372,31 @@ def test_overlong_text_never_covers_the_centre():
                    verdict='REJECTED: ' + 'reason ' * 200, verdict_ok=False)
     for canvas in (compose_live(grey(STREAM), hud), compose_review(grey(FULL), [], False, hud)):
         assert (canvas[180:400] == GREY).all()
+
+
+@pytest.mark.parametrize('canvas_size', [STREAM, (1280, 960)])
+def test_distance_readout_is_large_and_at_the_top_right(canvas_size):
+    plain = compose_live(grey(canvas_size), make_hud(), canvas_size=canvas_size)
+    shown = compose_live(grey(canvas_size), make_hud(distance=(0.8, 0.83)),
+                         canvas_size=canvas_size)
+    ys, xs = np.nonzero(np.any(shown != plain, axis=2))
+    w, h = canvas_size
+    ui = w / STREAM[0]
+    assert xs.min() > w / 2 and xs.max() == w - 1, 'a box flush with the right edge'
+    assert ys.min() >= band_rows(plain)[0].stop, 'under the top band'
+    assert ys.max() - ys.min() > 60 * ui, 'two lines, the first in large type'
+    white = (shown[ys, xs] > 230).all(axis=1)
+    assert white.sum() > 300 * ui ** 2, 'white text'
+
+
+def test_distance_readout_shows_a_word_in_amber_and_nothing_when_none():
+    plain = compose_live(grey(STREAM), make_hud())
+    word = compose_live(grey(STREAM), make_hud(distance='no board'))
+    amber = (word[..., 2] > 200) & (word[..., 1] > 150) & (word[..., 0] < 60)
+    assert amber.sum() > 200 and np.nonzero(amber)[1].min() > STREAM[0] / 2
+    np.testing.assert_array_equal(compose_live(grey(STREAM), make_hud(distance=None)), plain)
+    review = compose_review(grey(FULL), None, True, make_hud(distance=(0.8, 0.83)))
+    np.testing.assert_array_equal(review, compose_review(grey(FULL), None, True, make_hud()))
 
 
 def test_live_without_a_frame_is_black_under_the_hud():
