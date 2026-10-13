@@ -10,6 +10,7 @@ setup(
         ('share/ament_index/resource_index/packages',
             ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
+        ('share/' + package_name + '/launch', ['launch/convchart.launch.py']),
     ],
     install_requires=['setuptools'],
     zip_safe=True,
@@ -26,6 +27,12 @@ setup(
         'console_scripts': [
             'calibrate = convchart_ros.calibrate:main',
             'fake_camera = convchart_ros.calib_utils.fake_camera:main',
+            'ssl = convchart_ros.ssl_node:main',
+            'inference = convchart_ros.convchart:main',
+            'replay = convchart_ros.replay:main',
+            'pose_view = convchart_ros.pose_view:main',
+            'telemetry = convchart_ros.telemetry:main',
+            'image_relay = convchart_ros.image_relay:main',
         ],
     },
 )
