@@ -451,9 +451,14 @@ def read_saved_session(folder: str | os.PathLike) -> SavedSession:
         match = _FRAME_FILE.fullmatch(path.name)
         if match:
             files[match.group(1)][int(match.group(2))] = f"frames/{path.name}"
-    logged = [entry for entry in (log or {}).get("views") or [] if isinstance(entry, dict)]
-    dropped = {int(entry["index"]) for entry in logged if entry.get("dropped")}
-    used = set(files["view"]) | set(files["undone"]) | {int(entry["index"]) for entry in logged}
+    logged: dict[int, bool] = {}
+    for entry in (log or {}).get("views") or []:
+        try:
+            logged[int(entry["index"])] = bool(entry.get("dropped"))
+        except (AttributeError, KeyError, TypeError, ValueError):
+            continue
+    dropped = {index for index, was_dropped in logged.items() if was_dropped}
+    used = set(files["view"]) | set(files["undone"]) | set(logged)
     return SavedSession(
         folder=folder,
         views=[(index, files["view"][index], index in dropped) for index in sorted(files["view"])],

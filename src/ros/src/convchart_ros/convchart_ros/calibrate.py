@@ -180,10 +180,14 @@ class CalibrateCam(Node):
             self.get_logger().error(str(error))
             self.destroy_node()
             raise
-        earlier = (saved.log or {}).get("session") or {} if saved is not None else {}
+        earlier = (saved.log or {}).get("session") if saved is not None else None
+        earlier = earlier if isinstance(earlier, dict) else {}
         self._started = (str(earlier["started"]) if earlier.get("started")
                          else started.isoformat(timespec="seconds"))
-        self._resumed: list[dict] = [dict(entry) for entry in earlier.get("resumed") or []]
+        resumed = earlier.get("resumed")
+        self._resumed: list[dict] = [dict(entry) for entry in
+                                     (resumed if isinstance(resumed, list) else [])
+                                     if isinstance(entry, dict)]
         if saved is not None:
             self._resumed.append({"at": started.isoformat(timespec="seconds"),
                                   "detector": self._detector, "views_restored": len(view_files),

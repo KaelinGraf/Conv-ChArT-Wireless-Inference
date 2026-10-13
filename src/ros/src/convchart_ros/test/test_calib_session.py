@@ -493,6 +493,9 @@ def test_read_saved_session_takes_the_views_from_the_frames_and_drops_from_the_l
     assert ahead.views == [(0, 'frames/view_000.png', False)] and ahead.next_index == 9
     empty = read_saved_session(saved_session(tmp_path / 'd', []))
     assert (empty.views, empty.rejected, empty.next_index) == ([], 0, 0)
+    odd = read_saved_session(saved_session(tmp_path / 'e', ['view_000.png'], {'views': [
+        {'index': 'x'}, {'dropped': True}, 'view 4', {'index': 2, 'dropped': True}]}))
+    assert odd.views == [(0, 'frames/view_000.png', False)] and odd.next_index == 3
 
 
 def test_read_saved_session_refuses_what_is_not_a_session(tmp_path):
