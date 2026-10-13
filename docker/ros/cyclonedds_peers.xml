@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!--
+  CycloneDDS profile for the laptop <-> Pi link when they cannot find each other by multicast: on different
+  subnets (UoA-WiFi hands the two different /19s) or behind client isolation. cyclonedds.xml is the profile
+  for one shared subnet. Here discovery and data are both unicast. Three environment variables name the hosts,
+  so the same file serves both ends:
+
+    P4P_DDS_IFACE  this machine's WiFi interface (laptop wlo1, Pi wlan0)
+    P4P_DDS_SELF   this machine's address on it (processes on the same host find each other through it)
+    P4P_DDS_PEER   the other machine's address
+
+    Pi container:      CYCLONEDDS_URI=file:///workspace/docker/ros/cyclonedds_peers.xml
+    laptop container:  CYCLONEDDS_URI=file:///workspace/Conv-ChArT-Wireless-Inference/docker/ros/cyclonedds_peers.xml
+
+  Every process on both ends needs them, ros2 CLI included. Stop the ros2 daemon (ros2 daemon stop) after
+  changing them, or the CLI answers from the old discovery.
+-->
+<CycloneDDS xmlns="https://cdds.io/config"
+            xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+            xsi:schemaLocation="https://cdds.io/config https://raw.githubusercontent.com/eclipse-cyclonedds/cyclonedds/master/etc/cyclonedds.xsd">
+  <Domain Id="any">
+    <General>
+      <Interfaces>
+        <NetworkInterface name="${P4P_DDS_IFACE}" />
+      </Interfaces>
+      <AllowMulticast>false</AllowMulticast>
+    </General>
+    <Discovery>
+      <ParticipantIndex>auto</ParticipantIndex>
+      <MaxAutoParticipantIndex>50</MaxAutoParticipantIndex>
+      <Peers>
+        <Peer address="${P4P_DDS_PEER}" />
+        <Peer address="${P4P_DDS_SELF}" />
+      </Peers>
+    </Discovery>
+    <Internal>
+      <SocketReceiveBufferSize min="10MB" />
+    </Internal>
+    <Tracing>
+      <Verbosity>warning</Verbosity>
+      <OutputFile>stderr</OutputFile>
+    </Tracing>
+  </Domain>
+</CycloneDDS>
