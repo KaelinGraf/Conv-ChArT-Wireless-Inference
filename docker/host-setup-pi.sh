@@ -5,9 +5,12 @@
 #     and the BNO085 without sudo)
 #   * a udev rule so /dev/i2c-* is group-readable (Ubuntu arm64 does not ship one)
 #   * DDS-friendly UDP buffers
+#   * p4p-camera-pipeline.service: configures the Pi 5 CSI pipeline for
+#     p4p_camera's v4l2 backend at every boot (see camera-pipeline-pi.sh)
 #
 #   sudo bash docker/host-setup-pi.sh
 set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 if [ "$(id -u)" -ne 0 ]; then
     echo "run with sudo: sudo bash $0" >&2
@@ -41,20 +44,45 @@ net.ipv4.ipfrag_high_thresh=134217728
 SYSCTL
 sysctl --system >/dev/null
 
+echo "== Camera pipeline at boot (p4p_camera's v4l2 backend)"
+command -v media-ctl >/dev/null || { apt-get update -qq && apt-get install -y -qq v4l-utils; }
+install -m 0755 "${SCRIPT_DIR}/camera-pipeline-pi.sh" /usr/local/sbin/p4p-camera-pipeline
+cat > /etc/systemd/system/p4p-camera-pipeline.service <<'UNIT'
+[Unit]
+Description=p4p: configure the Pi 5 CSI pipeline for p4p_camera's v4l2 backend
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# 15 fps = the camera node's frame_rate; keep the two equal.
+ExecStart=/usr/local/sbin/p4p-camera-pipeline 15
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+systemctl daemon-reload
+systemctl enable p4p-camera-pipeline.service
+systemctl restart p4p-camera-pipeline.service \
+    || echo "camera pipeline not configured yet: see systemctl status p4p-camera-pipeline"
+
 echo
 echo "Done. Log out and back in, plug in the Arduino Mega and check it appears as /dev/ttyACM0 (ls -l /dev/ttyACM*)."
 echo
-echo "Two things this script deliberately does NOT do, because editing the boot"
-echo "config is the operator's call (same policy as the camera overlay):"
+echo "Things this script deliberately does NOT do, because editing the boot"
+echo "config is the operator's call:"
 echo
 echo "  1. Add these to /boot/firmware/config.txt, then reboot:"
+echo "         camera_auto_detect=0"
+echo "         dtoverlay=arducam-pivariety     (,cam0 if the ribbon is in CAM/DISP 0)"
 echo "         dtparam=i2c_arm=on"
 echo "         dtparam=i2c_arm_baudrate=400000"
-echo "     Without the first, /dev/i2c-1 does not exist and the pi container will"
-echo "     not start at all."
+echo "     Without dtparam=i2c_arm=on, /dev/i2c-1 does not exist and the pi container"
+echo "     will not start at all."
 echo
-echo "  2. Put the i2c group's numeric gid in .env as I2C_GID:"
+echo "  2. Put the i2c group's numeric gid in .env as I2C_GID, and the gpio group's"
+echo "     as GPIO_GID:"
 echo "         getent group i2c | cut -d: -f3"
-echo "     The container needs the number, not the name."
+echo "         getent group gpio | cut -d: -f3"
+echo "     The container needs the numbers, not the names."
 echo
 echo "Then check the sensor answers:  i2cdetect -y 1   # expect 4a"

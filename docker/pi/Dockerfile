@@ -2,14 +2,16 @@
 # =============================================================================
 # p4p Raspberry Pi image (linux/arm64)
 #   ROS 2 Jazzy (ros-base) + numpy/scipy (Kalman filter, unconstrained MPC gain)
-#   + osqp/qpsolvers (constrained MPC QP) + pyserial (Arduino Mega 2560 over
+#   + osqp/qpsolvers (constrained MPC QP) + daqp (the default MPC QP solver of
+#   holonomic_mpc_ekf) + pyserial (Arduino Mega 2560 over
 #   /dev/ttyACM0, motor commands) + tf2 / tf_transformations + both
 #   WiFi-friendly RMWs (CycloneDDS, Zenoh). No ML dependencies of any kind.
-#   + OpenCV (p4p_camera's downscale and PNG encode).
+#   + OpenCV (p4p_camera's v4l2 capture, downscale and PNG encode -- all the
+#   camera needs; its CSI pipeline is set up on the host, see docker/README.md).
 #   + the Adafruit BNO085 stack (p4p_imu, over /dev/i2c-1). The IMU used to hang
 #   off the Mega and arrive in its telemetry rows; it is on the Pi's I2C bus now.
-#   Camera stack is opt-in: --build-arg WITH_CAMERA=1 adds v4l-utils and
-#   Arducam's libcamera fork + picamera2 for the Pivariety OV2311.
+#   --build-arg WITH_CAMERA=1 adds v4l-utils, v4l2_camera and the image_transport
+#   plugins; its Arducam libcamera + picamera2 step cannot install on this base.
 #
 # Build context is ./docker (see compose.yaml). Same layout / entrypoint / user
 # as the GPU image so a node developed on the laptop runs unchanged here.
@@ -44,15 +46,21 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         ros-${ROS_DISTRO}-demo-nodes-py \
     && if [ "${WITH_CAMERA}" = "1" ]; then apt-get install -y --no-install-recommends \
         v4l-utils \
-        python3-kms++ python3-prctl libatlas-base-dev \
+        python3-prctl libatlas-base-dev \
         ros-${ROS_DISTRO}-v4l2-camera \
         ros-${ROS_DISTRO}-image-transport-plugins ; fi \
     && rm -rf /var/lib/apt/lists/* \
     && python3 -m pip install osqp==1.1.3 qpsolvers==4.13.0 \
     && python3 -m pip install adafruit-blinka==9.2.0 \
-        adafruit-circuitpython-bno08x==1.3.3 adafruit-extended-bus==1.0.2 \
+        adafruit-circuitpython-bno08x==1.3.3 adafruit-extended-bus==1.0.2 lgpio==0.2.2.0 \
     && source /opt/ros/${ROS_DISTRO}/setup.bash \
-    && python3 -c "import rclpy, numpy, scipy, serial, yaml, cv2, tf_transformations, transforms3d, osqp, qpsolvers, adafruit_bno08x, adafruit_extended_bus; print('pi deps OK numpy', numpy.__version__, 'scipy', scipy.__version__, 'pyserial', serial.__version__, 'cv2', cv2.__version__, 'osqp', osqp.__version__, 'bno08x', adafruit_bno08x.__version__)"
+    && python3 -c "import rclpy, numpy, scipy, serial, yaml, cv2, tf_transformations, transforms3d, osqp, qpsolvers, adafruit_bno08x, adafruit_extended_bus, lgpio; print('pi deps OK numpy', numpy.__version__, 'scipy', scipy.__version__, 'pyserial', serial.__version__, 'cv2', cv2.__version__, 'osqp', osqp.__version__, 'bno08x', adafruit_bno08x.__version__)"
+
+RUN python3 -m pip install daqp==0.10.3 \
+    && python3 -c "import numpy as np, daqp; \
+        x, _, flag, _ = daqp.solve(np.eye(2), np.array([1.0, -1.0]), np.eye(2), \
+                                   np.full(2, 0.5), np.full(2, -0.5)); \
+        assert flag == 1 and np.allclose(x, [-0.5, 0.5]), (flag, x); print('daqp OK', x)"
 
 RUN python3 -m pip install --no-deps ros2-numpy==0.0.5 \
     && d="$(python3 -m pip show ros2-numpy | sed -n 's/^Location: //p')/ros2_numpy" \
