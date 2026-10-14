@@ -23,6 +23,14 @@ writes the render_hz frames to an mp4, headless runs without the window (snapsho
 image_topic '' leaves the camera out. The window is scaled to fill the screen (scale 0, the default; any
 other scale is the canvas's factor). Without dock_msgs (the controller workspace not sourced) only the camera,
 cmd_vel, drive status and poses are shown, and the dashboard says why. q or Esc in the window quits.
+
+Docking captures (capture, on by default): START DOCKING starts recording and STOP or CANCEL DOCKING ends it,
+into capture_dir/dock_<UTC start> (the docking bags' naming; default <repo>/dash_captures): dashboard.mp4, the
+whole window; camera.mp4, the camera with the board overlay; and ekf_mpc_hud.mov and topdown_hud.mov, the EKF and
+MPC plots and the top-down view without their background (ProRes 4444 with alpha), to lay over a film of the
+robot. All four run at capture_fps from the press, so they line up frame for frame; capture.json records the
+start time, the stage changes and the files (dash_capture.py). While recording the dashboard is drawn at
+capture_fps; capture_max_s ends a capture nobody stopped.
 """
 from __future__ import annotations
 
@@ -30,6 +38,7 @@ from collections import deque
 import math
 import os
 from pathlib import Path
+import shutil
 import signal
 import threading
 import time
@@ -50,6 +59,7 @@ from sensor_msgs.msg import CompressedImage
 from std_srvs.srv import SetBool
 import yaml
 
+from convchart_ros.dash_capture import Capture, matte
 from convchart_ros.screen import fill_scale, screen_size
 
 try:
@@ -89,6 +99,9 @@ BUTTONS = (("ARM DRIVE", "arm_drive"), ("START DOCKING", "start"), ("CANCEL DOCK
            ("STOP  (space)", "stop"))
 STOP_KEYS = (ord(" "),)
 FONT = cv2.FONT_HERSHEY_SIMPLEX
+CAPTURE = {"dashboard": ((0, 0, W, H), "bgr"), "camera": (CAMERA, "bgr"), "ekf_mpc_hud": (SERIES, "bgra"),
+           "topdown_hud": (TOPDOWN, "bgra")}
+EASE_S = 0.1
 
 
 def _bgr(hex_colour):
@@ -138,9 +151,10 @@ def pill(img, s, x, y, look, scale=0.45, thick=1):
     return int(x + w + 12)
 
 
-def panel(img, rect, title=None, note=None, note_colour=MUTED):
+def panel(img, rect, title=None, note=None, note_colour=MUTED, fill=True):
     x, y, w, h = rect
-    cv2.rectangle(img, (x, y), (x + w - 1, y + h - 1), SURFACE, -1)
+    if fill:
+        cv2.rectangle(img, (x, y), (x + w - 1, y + h - 1), SURFACE, -1)
     if title:
         put(img, title, x + 10, y + 18, INK2, 0.45)
     if note:
@@ -264,18 +278,29 @@ class Telemetry(Node):
         dyn = ParameterDescriptor(dynamic_typing=True)
         p = {k: self.declare_parameter(k, overrides.get(k, v), dyn).value for k, v in {
             "image_topic": "image", "headless": False, "snapshot": "", "snapshot_period_s": 1.0, "record": "",
-            "render_hz": 10.0, "history_s": 20.0, "history_hz": 25.0, "scale": 0.0, "config": ""}.items()}
+            "render_hz": 10.0, "history_s": 20.0, "history_hz": 25.0, "scale": 0.0, "config": "",
+            "capture": True, "capture_dir": "", "capture_fps": 30.0, "capture_max_s": 300.0}.items()}
         self.headless, self.snapshot, self.record = bool(p["headless"]), str(p["snapshot"]), str(p["record"])
         self.snapshot_period_s, self.render_hz = float(p["snapshot_period_s"]), float(p["render_hz"])
         self.history_s, self.scale, history_hz = float(p["history_s"]), float(p["scale"]), float(p["history_hz"])
+        self.capture_on, self.capture_fps = bool(p["capture"]), float(p["capture_fps"])
+        self.capture_max_s = float(p["capture_max_s"])
         if self.headless and not (self.snapshot or self.record):
             raise ValueError("headless:=true needs snapshot:=<out.png> or record:=<out.mp4>, or nothing would "
                              "come of it")
         if self.snapshot and Path(self.snapshot).suffix.lower() != ".png":
             raise ValueError(f"snapshot must be a .png file, got {self.snapshot!r}")
-        if min(self.snapshot_period_s, self.render_hz, self.history_s, history_hz) <= 0 or self.scale < 0:
-            raise ValueError("snapshot_period_s, render_hz, history_s and history_hz must be > 0, and scale >= 0 "
-                             "(0 fills the screen)")
+        if min(self.snapshot_period_s, self.render_hz, self.history_s, history_hz, self.capture_fps,
+               self.capture_max_s) <= 0 or self.scale < 0:
+            raise ValueError("snapshot_period_s, render_hz, history_s, history_hz, capture_fps and capture_max_s "
+                             "must be > 0, and scale >= 0 (0 fills the screen)")
+        if str(p["capture_dir"]).strip():
+            self.capture_dir = Path(str(p["capture_dir"]).strip()).expanduser()
+        else:
+            from convchart_ros.launch_plan import find_repo
+            repo = find_repo(Path(__file__).resolve())
+            self.capture_dir = (Path(repo) if repo else Path.home()) / "dash_captures"
+        self.ffmpeg = shutil.which("ffmpeg")
         self.dock = DockEstimate is not None
         image = str(p["image_topic"]).strip()
         n = int(self.history_s * 50) + 16
@@ -308,6 +333,9 @@ class Telemetry(Node):
         self._ranges, self._view, self._logged = {}, None, {}
         self._blank = np.full((H, W, 3), PAGE, np.uint8)
         self._canvas = self._blank
+        self._dt, self._last_render = EASE_S, None
+        self.capture, self._finishing, self._huds = None, [], {}
+        self._matte, self._redraw, self._captured_stage = False, False, None
         self.drive_arm = self.create_client(SetBool, "serial_bridge/arm")
         self.dock_arm = self.create_client(SetBool, "dock/arm")
         self.buttons = {}
@@ -319,7 +347,10 @@ class Telemetry(Node):
                                + ", ".join(s.topic for s in self.streams.values() if s.enabled)
                                + (f"; snapshot to {self.snapshot}" if self.snapshot else "")
                                + (f"; recording to {self.record}" if self.record else "")
+                               + (f"; docking captures to {self.capture_dir}" if self.capture_on else "")
                                + ("; headless" if self.headless else ""))
+        if self.capture_on and self.ffmpeg is None:
+            self.get_logger().warning("ffmpeg is not on PATH: docking captures cannot be recorded")
         if not self.dock:
             self.get_logger().warning("dock_msgs is not importable (source the controller workspace's "
                                       "install/setup.bash): no EKF, stage or MPC; showing the camera, cmd_vel, "
@@ -366,16 +397,85 @@ class Telemetry(Node):
                 self.get_logger().info(f"{s.topic}: " + ("flowing again" if was else "first message"))
 
     def act(self, action) -> None:
-        """Run a control-strip action: ARM DRIVE, START DOCKING (the drive first), CANCEL DOCKING or STOP."""
+        """
+        Run a control-strip action: ARM DRIVE, START DOCKING (the drive first), CANCEL DOCKING or STOP.
+
+        START DOCKING also starts a docking capture, and STOP and CANCEL DOCKING end it.
+        """
         if action == "stop":
             self._call(self.dock_arm, False)
             self._call(self.drive_arm, False)
+            self.stop_capture("STOP")
         elif action == "cancel":
             self._call(self.dock_arm, False)
+            self.stop_capture("CANCEL DOCKING")
         elif action == "arm_drive":
             self._call(self.drive_arm, True)
         elif action == "start":
+            self.start_capture()
             self._call(self.drive_arm, True, then=lambda: self._call(self.dock_arm, True))
+
+    def start_capture(self, now=None) -> None:
+        """Start a docking capture, unless one is recording or captures are off (capture:=false)."""
+        if not self.capture_on or (self.capture is not None and self.capture.recording):
+            return
+        if self.ffmpeg is None:
+            self._reply("capture: ffmpeg is not on PATH, nothing recorded", CRIT)
+            return
+        now = time.monotonic() if now is None else now
+        name = time.strftime("dock_%Y%m%d_%H%M%S", time.gmtime())
+        folder = self.capture_dir / name
+        for k in range(2, 100):
+            if not folder.exists():
+                break
+            folder = self.capture_dir / f"{name}_{k}"
+        outputs = {key: (rect[2], rect[3], kind) for key, (rect, kind) in CAPTURE.items()}
+        info = {"dashboard": f"telemetry of {self.namespace} on domain {self.domain}",
+                "bag": f"the robot's bag of this arming is the dock_<UTC> folder that starts about 1 s after "
+                       f"{name[5:]}"}
+        try:
+            self.capture = Capture(folder, outputs, self.capture_fps, now, info, self.ffmpeg)
+        except OSError as error:
+            self._reply(f"capture: cannot record into {folder}: {error}", CRIT)
+            return
+        self._captured_stage, self._redraw = None, True
+        self._reply(f"capture: recording {folder}", GOOD)
+
+    def stop_capture(self, reason, now=None) -> None:
+        """End the docking capture being recorded; its files are finished in the background."""
+        cap = self.capture
+        if cap is None or not cap.recording:
+            return
+        cap.stop(time.monotonic() if now is None else now, reason,
+                 on_done=lambda c: self._reply(f"capture: {c.summary()}", CRIT if c.errors() else GOOD))
+        self._finishing = [c for c in self._finishing if not c.done.is_set()] + [cap]
+        self._huds = {}
+
+    def finish_captures(self, timeout_s=8.0) -> bool:
+        """Wait for every capture's files to be finished (at exit, inside the launch's 10 s); whether they were."""
+        deadline = time.monotonic() + timeout_s
+        return all(c.wait(max(0.0, deadline - time.monotonic())) for c in self._finishing)
+
+    def capture_frame(self, now, vis) -> None:
+        """Give the capture being recorded a newly drawn canvas (and the panels drawn without background)."""
+        cap = self.capture
+        if cap is None or not cap.recording:
+            return
+        if cap.elapsed(now) >= self.capture_max_s:
+            self.stop_capture(f"capture_max_s {self.capture_max_s:g} s", now)
+            return
+        stage = self.streams["stage"].latest
+        sid = None if stage is None else stage.stage
+        if sid != self._captured_stage and sid is not None:
+            cap.mark(now, "stage " + (STAGES[sid] if sid < len(STAGES) else str(sid)))
+            self._captured_stage = sid
+        for key, (rect, kind) in CAPTURE.items():
+            if kind == "bgr":
+                x, y, w, h = rect
+                cap.push(key, now, vis if (w, h) == (W, H) else np.ascontiguousarray(vis[y:y + h, x:x + w]))
+        for key, frame in self._huds.items():
+            cap.push(key, now, frame)
+        self._huds = {}
 
     def _call(self, client, value, then=None) -> None:
         """Call one arming service without waiting; record the reply and, on success, run then."""
@@ -414,16 +514,48 @@ class Telemetry(Node):
             hist = {k: list(s.history) for k, s in self.streams.items() if s.history is not None}
             replies = list(self.replies)
         st = self.states(now)
+        self._dt = EASE_S if self._last_render is None else min(max(now - self._last_render, 0.0), 1.0)
+        self._last_render = now
+        view, ranges = self._view, dict(self._ranges)
         img = self._blank.copy()
         self._draw_camera(img, now, st)
         self._draw_topdown(img, now, st, hist)
         self._draw_status(img, now, st)
         self._draw_streams(img, now, st)
         self._draw_series(img, now, st, hist)
-        self._draw_controls(img, replies)
+        self._draw_controls(img, replies, now)
         self._canvas = img
         self.rendered += 1
+        if self.capture is not None and self.capture.recording:
+            self._huds = self._render_huds(now, st, hist, view, ranges)
         return img
+
+    def _render_huds(self, now, st, hist, view, ranges) -> dict:
+        """The top-down and EKF/MPC panels without their background, as BGRA for the capture's HUD
+        videos.
+        """
+        drawn, done = [], (self._view, self._ranges)
+        with self._lock:
+            for bg in (0, 255):
+                img = np.full((H, W, 3), bg, np.uint8)
+                self._view, self._ranges, self._matte = view, dict(ranges), True
+                try:
+                    self._draw_topdown(img, now, st, hist)
+                    self._draw_series(img, now, st, hist)
+                finally:
+                    self._matte = False
+                drawn.append(img)
+        self._view, self._ranges = done
+        out = {}
+        for key, (rect, kind) in CAPTURE.items():
+            if kind == "bgra":
+                x, y, w, h = rect
+                out[key] = matte(drawn[0][y:y + h, x:x + w], drawn[1][y:y + h, x:x + w])
+        return out
+
+    def _ease(self, f) -> float:
+        """An easing factor of f per EASE_S, for the time since the last full drawing."""
+        return 1.0 - (1.0 - f) ** (self._dt / EASE_S)
 
     def render_frame(self, now=None) -> np.ndarray:
         """The last full drawing with the camera panel drawn again: a new frame between the render_hz redraws."""
@@ -433,7 +565,7 @@ class Telemetry(Node):
         self.rendered += 1
         return img
 
-    def _draw_controls(self, img, replies):
+    def _draw_controls(self, img, replies, now):
         x, y, w, h = CONTROLS
         panel(img, (x, y, w, h))
         bx, by, bh = x + 10, y + 8, h - 16
@@ -450,8 +582,19 @@ class Telemetry(Node):
             put(img, client.srv_name + ("" if ready else "  (no service)"), bx + 16, y + 23 + 22 * i,
                 INK2 if ready else MUTED, 0.42)
         bx += 300
+        right = x + w - 10
+        cap = self.capture
+        if cap is not None and cap.recording:
+            label = f"REC {cap.elapsed(now):.0f} s"
+            put_right(img, label, right, y + h // 2 + 7, INK, 0.6, 2)
+            cv2.circle(img, (right - width(label, 0.6, 2) - 14, y + h // 2), 8, CRIT, -1, cv2.LINE_AA)
+            right -= width(label, 0.6, 2) + 34
+        elif self.capture_on:
+            label = "records on START" if self.ffmpeg else "no ffmpeg: no capture"
+            put_right(img, label, right, y + h // 2 + 5, MUTED if self.ffmpeg else CRIT, 0.42)
+            right -= width(label, 0.42) + 16
         for i, (s, colour) in enumerate(replies):
-            put(img, fit(s, x + w - 10 - bx, 0.42), bx, y + 23 + 22 * i, colour, 0.42)
+            put(img, fit(s, right - bx, 0.42), bx, y + 23 + 22 * i, colour, 0.42)
 
     def _draw_camera(self, img, now, st):
         x, y, w, h = CAMERA
@@ -528,7 +671,7 @@ class Telemetry(Node):
 
     def _draw_topdown(self, img, now, st, hist):
         x, y, w, h = TOPDOWN
-        panel(img, (x, y, w, h), "TOP-DOWN", "target frame [m], x right, y up")
+        panel(img, (x, y, w, h), "TOP-DOWN", "target frame [m], x right, y up", fill=not self._matte)
         legend = (("estimate", EST, "dot"), ("fix", FIX, "dot"), ("MPC plan", MPC, "line"),
                   ("reference", INK2, "ring"))
         lx = x + w - 10
@@ -572,7 +715,7 @@ class Telemetry(Node):
             self._view = [centre, half_x]
         else:
             (c0, h0) = self._view
-            self._view = [c0 + 0.3 * (centre - c0), h0 + 0.1 * (half_x - h0)]
+            self._view = [c0 + self._ease(0.3) * (centre - c0), h0 + self._ease(0.1) * (half_x - h0)]
         (cx, cy), half_x = self._view
         k = (px1 - px0) / 2 / half_x
         mx, my = (px0 + px1) / 2, (py0 + py1) / 2
@@ -777,13 +920,15 @@ class Telemetry(Node):
         for s, colour in notes:
             put(img, fit(s, w - 20, 0.4), x + 10, row, colour, 0.4)
             row += 18
-        footer = (f"drawn at {self.render_hz:g} Hz" if self.headless else
-                  f"drawn per frame + {self.render_hz:g} Hz;  space STOP;  q or Esc quits")
+        hz = max(self.render_hz, self.capture_fps) if self.capture is not None and self.capture.recording \
+            else self.render_hz
+        footer = (f"drawn at {hz:g} Hz" if self.headless else
+                  f"drawn per frame + {hz:g} Hz;  space STOP;  q or Esc quits")
         put(img, footer, x + 10, y + h - 10, MUTED, 0.4)
 
     def _draw_series(self, img, now, st, hist):
         x, y, w, h = SERIES
-        panel(img, (x, y, w, h))
+        panel(img, (x, y, w, h), fill=not self._matte)
         span = self.history_s
         px0, px1 = x + 58, x + w - 10
         est_t = np.array([t for t, _ in hist.get("estimate", ())])
@@ -909,7 +1054,8 @@ class Telemetry(Node):
         lo, hi = lo - pad, hi + pad
         prev = self._ranges.get(key)
         if prev is not None and lo >= prev[0] and hi <= prev[1]:
-            lo, hi = prev[0] + 0.05 * (lo - prev[0]), prev[1] + 0.05 * (hi - prev[1])
+            k = self._ease(0.05)
+            lo, hi = prev[0] + k * (lo - prev[0]), prev[1] + k * (hi - prev[1])
         self._ranges[key] = (lo, hi)
         for k in range(int(span // 5) + 1):
             u = int(px1 - k * 5 / span * (px1 - px0))
@@ -965,6 +1111,8 @@ def run(node: Telemetry, stop: threading.Event | None = None) -> None:
             now = time.monotonic()
             count = node.streams["image"].count
             new_frame = not node.headless and count != shown
+            if node._redraw:
+                node._redraw, next_draw = False, now
             if now < next_draw and not new_frame:
                 if node.headless:
                     time.sleep(min(next_draw - now, 0.05))
@@ -973,12 +1121,19 @@ def run(node: Telemetry, stop: threading.Event | None = None) -> None:
                 continue
             shown = count
             if now >= next_draw:
-                next_draw = max(next_draw + period, now)
+                recording = node.capture is not None and node.capture.recording
+                draw_period = 1.0 / max(node.render_hz, node.capture_fps) if recording else period
+                next_draw = max(next_draw + draw_period, now)
                 states = node.states(now)
                 node.log_changes(states)
                 vis = node.render(now)
             else:
                 vis = node.render_frame(now)
+            try:
+                node.capture_frame(now, vis)
+            except Exception as error:      # noqa: BLE001
+                node.get_logger().error(f"docking capture stopped: {error}")
+                node.stop_capture(f"error: {error}", now)
             if node.snapshot and now >= next_snapshot:
                 next_snapshot = now + node.snapshot_period_s
                 ok, png = cv2.imencode(".png", vis, [cv2.IMWRITE_PNG_COMPRESSION, 1])
@@ -1013,6 +1168,10 @@ def run(node: Telemetry, stop: threading.Event | None = None) -> None:
         if writer is not None:
             writer.release()
             node.get_logger().info(f"wrote {written} frames to {node.record}")
+        node.stop_capture("dashboard closed")
+        if not node.finish_captures():
+            node.get_logger().warning("a docking capture was still being finished at exit: its ffmpeg finishes "
+                                      "the file on its own")
         if not node.headless:
             cv2.destroyAllWindows()
 

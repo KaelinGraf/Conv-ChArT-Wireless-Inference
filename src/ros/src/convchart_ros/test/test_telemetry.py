@@ -10,6 +10,7 @@ dock_msgs, and through `ros2 launch ... task:=telemetry`. Isolated domain, disco
 private namespace, so not even a synthetic cmd_vel can reach a robot. Needs dock_msgs (source the controller
 workspace's install/setup.bash) for all but the test without it.
 """
+import json
 import math
 import os
 from pathlib import Path
@@ -140,7 +141,8 @@ class Robot:
 
 @pytest.fixture
 def dashboard(ros, tmp_path):
-    node = telemetry.Telemetry(headless=True, snapshot=str(tmp_path / "dash.png"), snapshot_period_s=0.2)
+    node = telemetry.Telemetry(headless=True, snapshot=str(tmp_path / "dash.png"), snapshot_period_s=0.2,
+                               capture_dir=str(tmp_path / "captures"))
     executor = SingleThreadedExecutor()
     executor.add_node(node)
     stop = threading.Event()
@@ -249,6 +251,61 @@ def test_start_arms_the_drive_then_the_docking_and_stop_disarms_both(dashboard):
         probe.destroy_node()
 
 
+def decoded(path, index, w, h, pix):
+    """One frame of a capture's video, as rgba or bgr24."""
+    raw = subprocess.run(["ffmpeg", "-v", "error", "-i", str(path), "-vf", f"select=eq(n\\,{index})", "-vsync", "0",
+                          "-frames:v", "1", "-f", "rawvideo", "-pix_fmt", pix, "-"], capture_output=True,
+                         check=True).stdout
+    return np.frombuffer(raw, np.uint8).reshape(h, w, 4 if pix == "rgba" else 3)
+
+
+@needs_dock
+@pytest.mark.skipif(shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None, reason="needs ffmpeg")
+def test_start_docking_records_the_window_and_each_panel_until_stop(dashboard, tmp_path):
+    """START DOCKING records the whole window, the camera, and the EKF/MPC and top-down panels without their
+    background, all frame for frame alike; a second START carries on; STOP ends it and the files are finished."""
+    probe = rclpy.create_node("capture_probe")
+    try:
+        with Robot(probe):
+            wait_for(lambda: all(s == "fresh" for s in dashboard.states().values()), "every stream to flow")
+            dashboard.act("start")
+            cap = dashboard.capture
+            assert cap is not None and cap.recording and cap.folder.parent == tmp_path / "captures"
+            wait_for(lambda: cap.elapsed(time.monotonic()) > 2.5, "2.5 s of capture")
+            dashboard.act("start")
+            assert dashboard.capture is cap and cap.recording
+            dashboard.act("stop")
+    finally:
+        probe.destroy_node()
+    assert not cap.recording and cap.wait(30.0) and not cap.errors(), cap.errors()
+    wait_for(lambda: any("capture: dock_" in s for s, _ in dashboard.replies), "the capture's summary")
+    record = json.loads((cap.folder / "capture.json").read_text())
+    assert record["status"] == "complete" and record["stopped_by"] == "STOP"
+    assert record["events"][1]["event"] == "stage APPROACH"
+    n = record["frames"]
+    assert n == round(30 * record["duration_s"]) and n >= 75
+    files = sorted(p.name for p in cap.folder.iterdir())
+    assert files == ["camera.mp4", "capture.json", "dashboard.mp4", "ekf_mpc_hud.mov", "topdown_hud.mov"]
+    for key, (rect, kind) in telemetry.CAPTURE.items():
+        out = record["outputs"][key]
+        assert (out["width"], out["height"], out["alpha"], out["frames"]) == (rect[2], rect[3], kind == "bgra", n)
+        assert out["pictures_drawn"] >= 0.8 * n, out
+    k = n // 2
+    full = decoded(cap.folder / "dashboard.mp4", k, telemetry.W, telemetry.H, "bgr24").astype(np.float32)
+    for key in ("ekf_mpc_hud", "topdown_hud"):
+        x, y, w, h = telemetry.CAPTURE[key][0]
+        hud = decoded(cap.folder / f"{key}.mov", k, w, h, "rgba").astype(np.float32)
+        alpha = hud[..., 3:] / 255.0
+        assert alpha[3, 3, 0] == 0 and (alpha > 0.99).mean() > 0.01, key
+        laid = hud[..., 2::-1] * alpha + np.array(telemetry.SURFACE, np.float32) * (1.0 - alpha)
+        assert np.abs(laid - full[y:y + h, x:x + w]).mean() < 4.0, key
+    x, y, w, h = telemetry.CAMERA
+    camera = decoded(cap.folder / "camera.mp4", k, w, h, "bgr24").astype(np.float32)
+    assert np.abs(camera - full[y:y + h, x:x + w]).mean() < 3.0
+    expected = cv2.cvtColor(camera_frame(), cv2.COLOR_GRAY2BGR).astype(np.float32)
+    assert np.abs(camera[60:420, 40:600] - expected[60:420, 40:600]).mean() < 6.0
+
+
 @needs_dock
 def test_the_dashboard_tracks_every_stream_and_flags_the_ones_that_stop(dashboard, tmp_path):
     from dock_msgs.msg import DockStage
@@ -311,7 +368,7 @@ def test_the_dashboard_tracks_every_stream_and_flags_the_ones_that_stop(dashboar
 
 def test_each_frame_is_drawn_as_it_comes_and_one_older_than_the_frame_on_show_is_dropped(ros, tmp_path):
     """The picture only moves forward: a late older frame is dropped; a clock that restarted is followed."""
-    node = telemetry.Telemetry(headless=True, snapshot=str(tmp_path / "dash.png"))
+    node = telemetry.Telemetry(headless=True, snapshot=str(tmp_path / "dash.png"), capture=False)
     pub = rclpy.create_node("order_probe")
     executor = SingleThreadedExecutor()
     for n in (node, pub):

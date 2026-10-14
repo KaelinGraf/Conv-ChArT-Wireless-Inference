@@ -10,6 +10,7 @@
     ros2 launch convchart_ros convchart.launch.py task:=finetune resume:=latest [base_detector:=<onnx>]   # carry on
     ros2 launch convchart_ros convchart.launch.py task:=infer [view:=true]   # poses to the robot, and the dashboard
     ros2 launch convchart_ros convchart.launch.py task:=infer dashboard:=false            # no dashboard
+    ros2 launch convchart_ros convchart.launch.py task:=infer capture:=false              # no docking captures
     ros2 launch convchart_ros convchart.launch.py task:=telemetry [snapshot:=dash.png] [headless:=true]  # dashboard
     ros2 launch convchart_ros convchart.launch.py --show-args                             # every argument
 
@@ -19,6 +20,9 @@ the namespace /local, so a replay can never feed the robot. The launch ends when
 exits (closing the calibration, overlay or dashboard window, the end of a replayed demo video, Ctrl-C).
 A live infer brings the telemetry dashboard up with it when there is a display (dashboard:=auto), and with the
 overlay or the dashboard it starts image_relay, so the Pi's frames cross the WiFi once.
+The dashboard records each docking, from START DOCKING to STOP or CANCEL DOCKING, into
+<repo>/dash_captures/dock_<UTC start>/ (capture_dir:= elsewhere, capture:=false not at all): the whole window, the
+camera, and the EKF/MPC and top-down panels without background (ProRes 4444 with alpha), frame for frame alike.
 telemetry needs the controller workspace sourced too (source controller_ws/install/setup.bash) for its
 EKF, stage and MPC panels. The rules live in convchart_ros/launch_plan.py.
 """

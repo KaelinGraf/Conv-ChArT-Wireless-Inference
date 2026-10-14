@@ -7,3 +7,4 @@ src/ros/log/
 calibration_output/
 ssl_output/
 docs/KALMAN_COVARIANCE_HOWTO.md
+dash_captures/

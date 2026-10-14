@@ -48,6 +48,10 @@ ARGUMENTS = {
     "snapshot": ("", "telemetry: rewrite this PNG with the dashboard every second"),
     "camera": ("true", "telemetry: show the Pi's image too (a second copy of the stream over the WiFi; "
                        "task:=infer dashboard:=true shares the inference node's instead)"),
+    "capture": ("true", "infer / telemetry: the dashboard records from START DOCKING to STOP or CANCEL DOCKING: "
+                        "the whole window, the camera, and the EKF/MPC and top-down panels without background "
+                        "(ProRes 4444 with alpha, for laying over a film of the robot)"),
+    "capture_dir": ("", "infer / telemetry: where those captures go, one folder each; default <repo>/dash_captures"),
     "view": ("false", "infer: also open the pose overlay window"),
     "dashboard": ("auto", "infer: also open the telemetry dashboard, on the inference node's copy of the frames "
                           "(closing it ends the launch): auto opens it when there is a display, true insists, false "
@@ -217,9 +221,13 @@ def plan(args: dict, repo: Path | None, env=None) -> Plan:
                                       "exit_after_idle_s": 3.0 if source == "video" else 0.0}, ends_launch,
                         stop_timeout_s=15.0)
 
+    capture = _bool("capture", a["capture"])
+    capture_dir = str(_path(a["capture_dir"])) if a["capture_dir"].strip() else ""
+
     def telemetry(headless, record, snapshot, image_topic):
         return NodeSpec("telemetry", {"headless": headless, "record": record, "snapshot": snapshot,
-                                      "image_topic": image_topic, "config": str(config)}, True, stop_timeout_s=10.0)
+                                      "image_topic": image_topic, "config": str(config), "capture": capture,
+                                      "capture_dir": capture_dir}, True, stop_timeout_s=10.0)
 
     nodes = []
     if task == "calibrate":

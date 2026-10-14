@@ -110,7 +110,7 @@ def test_live_infer_with_the_overlay_and_the_dashboard_shares_one_relayed_copy_o
     assert relay.parameters == {"output_topic": "laptop/image"} and relay.ends_launch and not relay.remappings
     assert inference.remappings == view.remappings == (("image", "laptop/image"),)
     assert dashboard.parameters == {"headless": False, "record": "", "snapshot": "", "image_topic": "laptop/image",
-                                    "config": cfg}
+                                    "config": cfg, "capture": True, "capture_dir": ""}
     assert dashboard.ends_launch and not dashboard.remappings
     assert "frames: one copy over the WiFi, relayed on /laptop/image to inference, pose_view, telemetry" in p.notes
     assert names(run(repo, task="infer", config=cfg, dashboard="true")) == ["image_relay", "inference", "telemetry"]
@@ -274,7 +274,7 @@ def test_telemetry_starts_only_the_dashboard_in_the_root_namespace(repo):
     (node,) = p.nodes
     assert node.executable == "telemetry" and node.ends_launch and p.namespace == "" and p.source == "pi"
     assert node.parameters == {"headless": False, "record": "", "snapshot": "", "image_topic": "image",
-                               "config": str(repo / "cfg" / "cfg.yaml")}
+                               "config": str(repo / "cfg" / "cfg.yaml"), "capture": True, "capture_dir": ""}
     assert any("telemetry dashboard of /, subscribing only" in n for n in p.notes)
     assert any(n.startswith("frames: the Pi's camera node on /image") for n in p.notes)
     assert run(repo, task="telemetry", namespace="/sim").namespace == "sim"
@@ -291,6 +291,16 @@ def test_telemetry_headless_needs_a_snapshot_or_a_recording(repo, tmp_path):
     assert Path(recorded.parameters["record"]).is_absolute() and not recorded.parameters["snapshot"]
     with pytest.raises(PlanError, match="must name a .png file"):
         run(repo, task="telemetry", snapshot="dash.jpg")
+
+
+def test_the_dashboard_records_docking_captures_unless_told_not_to(repo, tmp_path):
+    cfg = str(repo / "cfg" / "calibrated.yaml")
+    off = run(repo, task="infer", config=cfg, capture="false", capture_dir="caps").nodes[-1]
+    assert off.executable == "telemetry" and off.parameters["capture"] is False
+    assert Path(off.parameters["capture_dir"]).is_absolute() and Path(off.parameters["capture_dir"]).name == "caps"
+    assert run(repo, task="telemetry", capture_dir=str(tmp_path)).nodes[0].parameters["capture_dir"] == str(tmp_path)
+    with pytest.raises(PlanError, match="capture:= must be true or false"):
+        run(repo, task="telemetry", capture="sometimes")
 
 
 @pytest.mark.parametrize("args", [{"video": "CLIP"}, {"source": "video", "video": "CLIP"}, {"source": "fake"}])
