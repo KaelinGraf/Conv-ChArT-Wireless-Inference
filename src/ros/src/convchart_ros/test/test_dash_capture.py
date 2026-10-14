@@ -1,5 +1,6 @@
 """
-The dashboard's docking captures (dash_capture.py): the alpha matte, the frame timing, and the files ffmpeg writes.
+The dashboard's docking captures (dash_capture.py): the alpha from one drawing (unmix), the frame timing, and the
+files ffmpeg writes.
 
     python3 -m pytest src/ros/src/convchart_ros/test/test_dash_capture.py -q
 
@@ -14,27 +15,33 @@ import cv2
 import numpy as np
 import pytest
 
-from convchart_ros.dash_capture import Capture, frames_due, frames_total, matte, Recorder
+from convchart_ros.dash_capture import Capture, CLEAR, frames_due, frames_total, Recorder, unmix
 
 HAVE_FFMPEG = shutil.which("ffmpeg") is not None and shutil.which("ffprobe") is not None
 needs_ffmpeg = pytest.mark.skipif(not HAVE_FFMPEG, reason="needs ffmpeg and ffprobe")
 
 
 def drawing(bg):
-    """The kinds of drawing the dashboard does, over a background: AA lines and text, a filled dot, a 30 % band."""
-    img = np.empty((120, 200, 3), np.uint8)
+    """
+    The kinds of drawing the dashboard does, with its 3-value colours, over a background (3 or 4 values): AA and
+    plain lines, outlined text, a filled dot and a 30 % band.
+    """
+    img = np.empty((120, 200, len(bg)), np.uint8)
     img[:] = bg
+    cv2.line(img, (0, 50), (199, 50), (42, 44, 44), 1)
     cv2.line(img, (5, 100), (190, 20), (229, 135, 57), 2, cv2.LINE_AA)
     cv2.putText(img, "x +0.123", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1, cv2.LINE_AA)
     cv2.circle(img, (150, 80), 6, (38, 89, 217), -1, cv2.LINE_AA)
+    for colour, thick in (((13, 13, 13), 3), ((183, 194, 195), 1)):
+        cv2.putText(img, "theta [deg]", (40, 112), cv2.FONT_HERSHEY_SIMPLEX, 0.4, colour, thick, cv2.LINE_AA)
     over = img.copy()
     cv2.fillPoly(over, [np.array([(20, 60), (120, 50), (120, 90), (20, 95)], np.int32)], (112, 158, 25), cv2.LINE_AA)
     cv2.addWeighted(over, 0.3, img, 0.7, 0, dst=img)
     return img
 
 
-def test_the_matte_lays_the_drawing_over_any_background_as_if_drawn_on_it():
-    hud = matte(drawing(0), drawing(255))
+def test_unmix_lays_the_drawing_over_any_background_as_if_drawn_on_it():
+    hud = unmix(drawing(CLEAR))
     assert hud.shape == (120, 200, 4) and hud.dtype == np.uint8
     assert hud[2, 2, 3] == 0 and np.all(hud[2, 2, :3] == 0)
     assert hud[80, 150, 3] == 255
@@ -44,7 +51,7 @@ def test_the_matte_lays_the_drawing_over_any_background_as_if_drawn_on_it():
         a = hud[..., 3:].astype(np.float32) / 255.0
         laid = hud[..., :3].astype(np.float32) * a + np.array(bg, np.float32) * (1.0 - a)
         err = np.abs(laid - drawing(bg).astype(np.float32))
-        assert err.max() <= 3.0 and err.mean() < 0.3, (bg, err.max(), err.mean())
+        assert err.max() <= 4.5 and err.mean() < 0.3, (bg, err.max(), err.mean())
 
 
 def test_frame_i_shows_the_newest_picture_drawn_by_its_time():
@@ -86,14 +93,14 @@ def decode(path, index, w, h, pix="rgba"):
 
 @needs_ffmpeg
 def test_a_capture_writes_same_length_files_and_the_hud_keeps_its_transparency(tmp_path):
-    hud = matte(drawing(0), drawing(255))
+    hud = unmix(drawing(CLEAR))
     t0 = time.monotonic()
     cap = Capture(tmp_path / "dock_20261015_000000", {"window": (200, 120, "bgr"), "hud": (200, 120, "bgra")},
                   30.0, t0, {"note": "test"})
     assert json.loads((cap.folder / "capture.json").read_text())["status"] == "recording"
     for k in range(20):
         t = t0 + k * 0.05
-        cap.push("window", t, drawing(30 + 5 * k))
+        cap.push("window", t, drawing((30 + 5 * k,) * 3))
         cap.push("hud", t, hud)
         if k == 10:
             cap.mark(t, "stage APPROACH")

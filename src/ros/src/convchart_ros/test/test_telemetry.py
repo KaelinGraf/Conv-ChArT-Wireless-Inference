@@ -299,6 +299,8 @@ def test_start_docking_records_the_window_and_each_panel_until_stop(dashboard, t
         assert alpha[3, 3, 0] == 0 and (alpha > 0.99).mean() > 0.01, key
         laid = hud[..., 2::-1] * alpha + np.array(telemetry.SURFACE, np.float32) * (1.0 - alpha)
         assert np.abs(laid - full[y:y + h, x:x + w]).mean() < 4.0, key
+        outline = (alpha[..., 0] > 0.99) & np.all(np.abs(hud[..., 2::-1] - telemetry.PAGE) <= 4, axis=2)
+        assert outline.sum() > 500, key
     x, y, w, h = telemetry.CAMERA
     camera = decoded(cap.folder / "camera.mp4", k, w, h, "bgr24").astype(np.float32)
     assert np.abs(camera - full[y:y + h, x:x + w]).mean() < 3.0

@@ -29,15 +29,19 @@ into capture_dir/dock_<UTC start> (the docking bags' naming; default <repo>/dash
 whole window; camera.mp4, the camera with the board overlay; and ekf_mpc_hud.mov and topdown_hud.mov, the EKF and
 MPC plots and the top-down view without their background (ProRes 4444 with alpha), to lay over a film of the
 robot. All four run at capture_fps from the press, so they line up frame for frame; capture.json records the
-start time, the stage changes and the files (dash_capture.py). While recording the dashboard is drawn at
-capture_fps; capture_max_s ends a capture nobody stopped.
+start time, the stage changes and the files (dash_capture.py). While recording, the whole dashboard is drawn at
+capture_fps (the camera with it, not on its own), and the two HUD panels again on a thread of their own (HudPainter),
+with their text drawn last with a dark outline; capture_max_s ends a capture nobody stopped.
 """
 from __future__ import annotations
 
 from collections import deque
+from contextlib import contextmanager
+import copy
 import math
 import os
 from pathlib import Path
+import queue
 import shutil
 import signal
 import threading
@@ -59,7 +63,7 @@ from sensor_msgs.msg import CompressedImage
 from std_srvs.srv import SetBool
 import yaml
 
-from convchart_ros.dash_capture import Capture, matte
+from convchart_ros.dash_capture import Capture, CLEAR, unmix
 from convchart_ros.screen import fill_scale, screen_size
 
 try:
@@ -118,7 +122,24 @@ DRIVE_LOOK = ((CRIT, INK), (CRIT, INK), (AXIS, INK2), (WARN, PAGE), (GOOD, INK))
 STATE_LOOK = {"fresh": GOOD, "stale": CRIT, "never": CRIT, "quiet": WARN, "off": DIM}
 
 
+_text = threading.local()
+
+
+@contextmanager
+def text_collected(sink):
+    """Collect put()'s text on this thread in sink instead of drawing it: the HUD copies draw theirs last."""
+    _text.sink = sink
+    try:
+        yield sink
+    finally:
+        _text.sink = None
+
+
 def put(img, s, x, y, colour=INK, scale=0.45, thick=1):
+    sink = getattr(_text, "sink", None)
+    if sink is not None:
+        sink.append((s, int(x), int(y), colour, scale, thick))
+        return
     cv2.putText(img, s, (int(x), int(y)), FONT, scale, colour, thick, cv2.LINE_AA)
 
 
@@ -334,8 +355,9 @@ class Telemetry(Node):
         self._blank = np.full((H, W, 3), PAGE, np.uint8)
         self._canvas = self._blank
         self._dt, self._last_render = EASE_S, None
-        self.capture, self._finishing, self._huds = None, [], {}
+        self.capture, self._finishing, self._hud = None, [], None
         self._matte, self._redraw, self._captured_stage = False, False, None
+        self._series_cache = (None, None)
         self.drive_arm = self.create_client(SetBool, "serial_bridge/arm")
         self.dock_arm = self.create_client(SetBool, "dock/arm")
         self.buttons = {}
@@ -439,6 +461,8 @@ class Telemetry(Node):
             self._reply(f"capture: cannot record into {folder}: {error}", CRIT)
             return
         self._captured_stage, self._redraw = None, True
+        if self._hud is None:
+            self._hud = HudPainter(self)
         self._reply(f"capture: recording {folder}", GOOD)
 
     def stop_capture(self, reason, now=None) -> None:
@@ -449,7 +473,6 @@ class Telemetry(Node):
         cap.stop(time.monotonic() if now is None else now, reason,
                  on_done=lambda c: self._reply(f"capture: {c.summary()}", CRIT if c.errors() else GOOD))
         self._finishing = [c for c in self._finishing if not c.done.is_set()] + [cap]
-        self._huds = {}
 
     def finish_captures(self, timeout_s=8.0) -> bool:
         """Wait for every capture's files to be finished (at exit, inside the launch's 10 s); whether they were."""
@@ -473,9 +496,6 @@ class Telemetry(Node):
             if kind == "bgr":
                 x, y, w, h = rect
                 cap.push(key, now, vis if (w, h) == (W, H) else np.ascontiguousarray(vis[y:y + h, x:x + w]))
-        for key, frame in self._huds.items():
-            cap.push(key, now, frame)
-        self._huds = {}
 
     def _call(self, client, value, then=None) -> None:
         """Call one arming service without waiting; record the reply and, on success, run then."""
@@ -513,6 +533,8 @@ class Telemetry(Node):
                 s.sample_rate(now)
             hist = {k: list(s.history) for k, s in self.streams.items() if s.history is not None}
             replies = list(self.replies)
+            cap = self.capture if self.capture is not None and self.capture.recording else None
+            frozen = {k: copy.copy(s) for k, s in self.streams.items()} if cap is not None else None
         st = self.states(now)
         self._dt = EASE_S if self._last_render is None else min(max(now - self._last_render, 0.0), 1.0)
         self._last_render = now
@@ -526,32 +548,9 @@ class Telemetry(Node):
         self._draw_controls(img, replies, now)
         self._canvas = img
         self.rendered += 1
-        if self.capture is not None and self.capture.recording:
-            self._huds = self._render_huds(now, st, hist, view, ranges)
+        if cap is not None:
+            self._hud.submit((cap, now, st, hist, view, ranges, frozen, self._dt))
         return img
-
-    def _render_huds(self, now, st, hist, view, ranges) -> dict:
-        """The top-down and EKF/MPC panels without their background, as BGRA for the capture's HUD
-        videos.
-        """
-        drawn, done = [], (self._view, self._ranges)
-        with self._lock:
-            for bg in (0, 255):
-                img = np.full((H, W, 3), bg, np.uint8)
-                self._view, self._ranges, self._matte = view, dict(ranges), True
-                try:
-                    self._draw_topdown(img, now, st, hist)
-                    self._draw_series(img, now, st, hist)
-                finally:
-                    self._matte = False
-                drawn.append(img)
-        self._view, self._ranges = done
-        out = {}
-        for key, (rect, kind) in CAPTURE.items():
-            if kind == "bgra":
-                x, y, w, h = rect
-                out[key] = matte(drawn[0][y:y + h, x:x + w], drawn[1][y:y + h, x:x + w])
-        return out
 
     def _ease(self, f) -> float:
         """An easing factor of f per EASE_S, for the time since the last full drawing."""
@@ -931,16 +930,7 @@ class Telemetry(Node):
         panel(img, (x, y, w, h), fill=not self._matte)
         span = self.history_s
         px0, px1 = x + 58, x + w - 10
-        est_t = np.array([t for t, _ in hist.get("estimate", ())])
-        est_x = np.array([m.x for _, m in hist.get("estimate", ())]).reshape(-1, 5)
-        est_sd = np.sqrt(np.maximum(np.array([m.p_diag for _, m in hist.get("estimate", ())]).reshape(-1, 5), 0.0))
-        fix_t = np.array([t for t, _ in hist.get("fix", ())])
-        fix_v = np.array([(m.x, m.y, m.theta) for _, m in hist.get("fix", ())]).reshape(-1, 3)
-        stage_t = np.array([t for t, _ in hist.get("stage", ())])
-        stage_ref = np.array([m.y_ref for _, m in hist.get("stage", ())]).reshape(-1, 3)
-        stage_cap = np.array([(m.v_max, m.v_max, m.r_max) for _, m in hist.get("stage", ())]).reshape(-1, 3)
-        cmd_t = np.array([t for t, _ in hist["cmd"]])
-        cmd_v = np.array([(m.linear.x, m.linear.y, m.angular.z) for _, m in hist["cmd"]]).reshape(-1, 3)
+        est_t, est_x, est_sd, fix_t, fix_v, stage_t, stage_ref, stage_cap, cmd_t, cmd_v = self._series_arrays(hist)
         deg = (1.0, 1.0, math.degrees(1.0), 1.0, 1.0)
 
         def legend(items, row):
@@ -1031,6 +1021,24 @@ class Telemetry(Node):
             label = "now" if k == 0 else f"-{k * 5} s"
             put(img, label, u - width(label, 0.38) // 2 if k else u - width(label, 0.38), top + 16, MUTED, 0.38)
 
+    def _series_arrays(self, hist):
+        """The plots' arrays from one drawing's history: built once, and reused by the HUD copies' drawings."""
+        if self._series_cache[0] is not hist:
+            est = hist.get("estimate", ())
+            stage = hist.get("stage", ())
+            self._series_cache = (hist, (
+                np.array([t for t, _ in est]),
+                np.array([m.x for _, m in est]).reshape(-1, 5),
+                np.sqrt(np.maximum(np.array([m.p_diag for _, m in est]).reshape(-1, 5), 0.0)),
+                np.array([t for t, _ in hist.get("fix", ())]),
+                np.array([(m.x, m.y, m.theta) for _, m in hist.get("fix", ())]).reshape(-1, 3),
+                np.array([t for t, _ in stage]),
+                np.array([m.y_ref for _, m in stage]).reshape(-1, 3),
+                np.array([(m.v_max, m.v_max, m.r_max) for _, m in stage]).reshape(-1, 3),
+                np.array([t for t, _ in hist["cmd"]]),
+                np.array([(m.linear.x, m.linear.y, m.angular.z) for _, m in hist["cmd"]]).reshape(-1, 3)))
+        return self._series_cache[1]
+
     def _strip(self, img, rect, px0, px1, now, span, title, readout, colour, layers, min_span, key):
         x, y, w, h = rect
         py0, py1 = y + 20, y + h - 6
@@ -1089,6 +1097,57 @@ class Telemetry(Node):
                 cv2.polylines(roi, segments(to_px(t, v), t), False, c, 2 if kind == "line" else 1, cv2.LINE_AA)
 
 
+class HudPainter:
+    """The top-down and EKF/MPC panels without their background, as BGRA for a capture's HUD
+    videos, on a thread.
+    """
+
+    _draw_topdown, _draw_series, _strip = Telemetry._draw_topdown, Telemetry._draw_series, Telemetry._strip
+    _ease, _series_arrays = Telemetry._ease, Telemetry._series_arrays
+
+    def __init__(self, node: Telemetry):
+        self.dock, self.history_s, self.logger = node.dock, node.history_s, node.get_logger()
+        self._matte, self.skipped = True, 0
+        self._canvas = np.zeros((H, W, 4), np.uint8)
+        self._jobs = queue.Queue(maxsize=1)
+        threading.Thread(target=self._run, name="telemetry_hud", daemon=True).start()
+
+    def submit(self, job) -> None:
+        try:
+            self._jobs.put_nowait(job)
+        except queue.Full:
+            self.skipped += 1
+
+    def _run(self) -> None:
+        while True:
+            cap, now, st, hist, view, ranges, streams, dt = self._jobs.get()
+            try:
+                for key, frame in self.paint(now, st, hist, view, ranges, streams, dt).items():
+                    cap.push(key, now, frame)
+            except Exception as error:      # noqa: BLE001
+                self.logger.error(f"HUD frame skipped: {error}", throttle_duration_sec=10.0)
+
+    def paint(self, now, st, hist, view, ranges, streams, dt) -> dict:
+        self.streams, self._dt, self._series_cache = streams, dt, (None, None)
+        self._view, self._ranges = view, dict(ranges)
+        img = self._canvas
+        for x, y, w, h in (TOPDOWN, SERIES):
+            img[y:y + h, x:x + w] = CLEAR
+        with text_collected([]) as texts:
+            self._draw_topdown(img, now, st, hist)
+            self._draw_series(img, now, st, hist)
+        for s, x, y, colour, scale, thick in texts:
+            if max(colour) > 100:
+                cv2.putText(img, s, (x, y), FONT, scale, PAGE, thick + 2, cv2.LINE_AA)
+            cv2.putText(img, s, (x, y), FONT, scale, colour, thick, cv2.LINE_AA)
+        out = {}
+        for key, (rect, kind) in CAPTURE.items():
+            if kind == "bgra":
+                x, y, w, h = rect
+                out[key] = unmix(img[y:y + h, x:x + w])
+        return out
+
+
 def stamp_ns(stamp) -> int:
     return stamp.sec * 1_000_000_000 + stamp.nanosec
 
@@ -1110,7 +1169,8 @@ def run(node: Telemetry, stop: threading.Event | None = None) -> None:
         while rclpy.ok() and not (stop is not None and stop.is_set()):
             now = time.monotonic()
             count = node.streams["image"].count
-            new_frame = not node.headless and count != shown
+            recording = node.capture is not None and node.capture.recording
+            new_frame = not node.headless and count != shown and not recording
             if node._redraw:
                 node._redraw, next_draw = False, now
             if now < next_draw and not new_frame:
@@ -1121,7 +1181,6 @@ def run(node: Telemetry, stop: threading.Event | None = None) -> None:
                 continue
             shown = count
             if now >= next_draw:
-                recording = node.capture is not None and node.capture.recording
                 draw_period = 1.0 / max(node.render_hz, node.capture_fps) if recording else period
                 next_draw = max(next_draw + draw_period, now)
                 states = node.states(now)

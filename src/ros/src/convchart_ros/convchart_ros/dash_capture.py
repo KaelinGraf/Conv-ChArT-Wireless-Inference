@@ -36,12 +36,15 @@ QUEUE = 8
 FINISH_S = 120.0
 
 
-def matte(on_black: np.ndarray, on_white: np.ndarray) -> np.ndarray:
-    """The BGRA picture (straight alpha) of a drawing, from two copies of it: one drawn on black,
-    one on white.
+CLEAR = (0, 0, 0, 255)
+
+
+def unmix(drawn: np.ndarray) -> np.ndarray:
+    """The BGRA picture (straight alpha) of a drawing made with 3-value colours on a canvas that
+    started as CLEAR.
     """
-    alpha = 255 - cv2.transform(cv2.subtract(on_white, on_black), np.full((1, 3), 1.0 / 3.0))
-    colour = cv2.divide(on_black, cv2.merge([alpha, alpha, alpha]), scale=255.0)
+    alpha = 255 - drawn[..., 3]
+    colour = cv2.divide(np.ascontiguousarray(drawn[..., :3]), cv2.merge([alpha, alpha, alpha]), scale=255.0)
     return cv2.merge([*cv2.split(colour), alpha])
 
 
