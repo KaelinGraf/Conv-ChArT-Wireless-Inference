@@ -127,7 +127,13 @@ _text = threading.local()
 
 @contextmanager
 def text_collected(sink):
-    """Collect put()'s text on this thread in sink instead of drawing it: the HUD copies draw theirs last."""
+    """Collect put()'s text on this thread in sink instead of drawing it.
+
+    The HUD copies use this to draw their text last, on top of everything else.
+
+    Args:
+        sink: List that receives one (text, x, y, colour, scale, thickness) tuple per put() call.
+    """
     _text.sink = sink
     try:
         yield sink
@@ -165,7 +171,17 @@ def fit(s, max_w, scale=0.45):
 
 
 def pill(img, s, x, y, look, scale=0.45, thick=1):
-    """A filled label with its baseline at y; returns its right edge."""
+    """Draw a filled label with its baseline at y and return its right edge.
+
+    Args:
+        img: BGR canvas to draw on.
+        s: Label text.
+        x: Left edge of the label, in canvas pixels.
+        y: Text baseline, in canvas pixels.
+        look: (background, text) BGR colours.
+        scale: OpenCV font scale.
+        thick: Text stroke thickness, in pixels.
+    """
     (w, h), _ = cv2.getTextSize(s, FONT, scale, thick)
     cv2.rectangle(img, (int(x), int(y - h - 5)), (int(x + w + 12), int(y + 5)), look[0], -1)
     put(img, s, x + 6, y, look[1], scale, thick)
@@ -197,7 +213,12 @@ def tick_label(v, step):
 
 
 def segments(points, t):
-    """Split a polyline where the stream it came from paused for longer than GAP_S."""
+    """Split a polyline where the stream it came from paused for longer than GAP_S.
+
+    Args:
+        points: (N, 2) array of polyline points, in pixels.
+        t: Receive time of each point, in seconds.
+    """
     if len(t) < 2:
         return [points] if len(t) else []
     return [p for p in np.split(points, np.where(np.diff(t) > GAP_S)[0] + 1) if len(p)]
@@ -212,7 +233,12 @@ def age_text(age):
 
 
 def load_overlay(config=""):
-    """Return ((K, dist, (cols, rows), square_m), note) for the board overlay, or (None, why not).
+    """Return ((K, dist, (cols, rows), square_m), note) for the board overlay, or (None, reason).
+
+    Camera model (at the pipeline's 640x480) and board come from CAMERA and BOARD in the config.
+
+    Args:
+        config: Path to the pipeline config; empty uses the repo's cfg/cfg.yaml.
     """
     path = Path(config) if config else None
     if path is None:
@@ -233,8 +259,13 @@ def load_overlay(config=""):
 
 
 def board_overlay(pose, model):
-    """Project the board with one pose (geometry_msgs/Pose, the board in the camera's optical
-    frame).
+    """Project the board's outline, inner corners, origin and axis tips to pixels for one pose.
+
+    None when a point is behind the camera or far outside the view, where the lens model diverges.
+
+    Args:
+        pose: geometry_msgs/Pose of the board in the camera's optical frame.
+        model: (K, dist, (cols, rows), square_m) camera model and board, as from load_overlay().
     """
     K, dist, (cols, rows), sq = model
     q, t = pose.orientation, pose.position
@@ -259,7 +290,16 @@ def board_overlay(pose, model):
 
 
 class Stream:
-    """One subscription: its latest message, when it came, how many, how fast, who publishes it."""
+    """One subscription: its latest message, when it came, how many, how fast, who publishes it.
+
+    Args:
+        topic: Topic name, relative to the node's namespace.
+        rate_hz: Expected message rate, in Hz.
+        stale_s: Silence after which the stream counts as stale, in seconds.
+        enabled: Whether the stream is subscribed at all.
+        keep: Number of (time, message) pairs kept as history; 0 keeps none.
+        keep_every_s: Minimum spacing between kept messages, in seconds.
+    """
 
     def __init__(self, topic, rate_hz, stale_s, enabled=True, keep=0, keep_every_s=0.0):
         self.topic, self.rate_hz, self.stale_s, self.enabled = topic, rate_hz, stale_s, enabled
@@ -394,7 +434,11 @@ class Telemetry(Node):
         self.create_subscription(kind, s.topic, on_message, qos, event_callbacks=events)
 
     def states(self, now=None) -> dict:
-        """Each stream's state: off, never, fresh, stale, or quiet (silent, and the stage or the pipeline says why)."""
+        """Return each stream's state: off, never, fresh, stale, or quiet (expected silence).
+
+        Args:
+            now: Monotonic time, in seconds; None uses the current time.
+        """
         now = time.monotonic() if now is None else now
         st = {k: s.state(now) for k, s in self.streams.items()}
         stage, pose = self.streams["stage"].latest, self.streams["pose"].latest
@@ -419,10 +463,12 @@ class Telemetry(Node):
                 self.get_logger().info(f"{s.topic}: " + ("flowing again" if was else "first message"))
 
     def act(self, action) -> None:
-        """
-        Run a control-strip action: ARM DRIVE, START DOCKING (the drive first), CANCEL DOCKING or STOP.
+        """Run a control-strip action: ARM DRIVE, START DOCKING, CANCEL DOCKING or STOP.
 
-        START DOCKING also starts a docking capture, and STOP and CANCEL DOCKING end it.
+        START DOCKING arms the drive first and starts a capture; STOP and CANCEL DOCKING end it.
+
+        Args:
+            action: One of "arm_drive", "start", "cancel" or "stop".
         """
         if action == "stop":
             self._call(self.dock_arm, False)
@@ -438,7 +484,11 @@ class Telemetry(Node):
             self._call(self.drive_arm, True, then=lambda: self._call(self.dock_arm, True))
 
     def start_capture(self, now=None) -> None:
-        """Start a docking capture, unless one is recording or captures are off (capture:=false)."""
+        """Start a docking capture, unless one is recording or captures are off (capture:=false).
+
+        Args:
+            now: Monotonic time of the start, in seconds; None uses the current time.
+        """
         if not self.capture_on or (self.capture is not None and self.capture.recording):
             return
         if self.ffmpeg is None:
@@ -466,7 +516,12 @@ class Telemetry(Node):
         self._reply(f"capture: recording {folder}", GOOD)
 
     def stop_capture(self, reason, now=None) -> None:
-        """End the docking capture being recorded; its files are finished in the background."""
+        """End the docking capture being recorded; its files are finished in the background.
+
+        Args:
+            reason: Why the capture ended, recorded in capture.json and the log.
+            now: Monotonic time of the stop, in seconds; None uses the current time.
+        """
         cap = self.capture
         if cap is None or not cap.recording:
             return
@@ -475,12 +530,21 @@ class Telemetry(Node):
         self._finishing = [c for c in self._finishing if not c.done.is_set()] + [cap]
 
     def finish_captures(self, timeout_s=8.0) -> bool:
-        """Wait for every capture's files to be finished (at exit, inside the launch's 10 s); whether they were."""
+        """Wait for every capture's files to be finished; return True if all finish in time.
+
+        Args:
+            timeout_s: Total time to wait, in seconds.
+        """
         deadline = time.monotonic() + timeout_s
         return all(c.wait(max(0.0, deadline - time.monotonic())) for c in self._finishing)
 
     def capture_frame(self, now, vis) -> None:
-        """Give the capture being recorded a newly drawn canvas (and the panels drawn without background)."""
+        """Give the capture being recorded a newly drawn canvas.
+
+        Args:
+            now: Monotonic time of the frame, in seconds.
+            vis: Full BGR dashboard canvas.
+        """
         cap = self.capture
         if cap is None or not cap.recording:
             return
@@ -498,7 +562,13 @@ class Telemetry(Node):
                 cap.push(key, now, vis if (w, h) == (W, H) else np.ascontiguousarray(vis[y:y + h, x:x + w]))
 
     def _call(self, client, value, then=None) -> None:
-        """Call one arming service without waiting; record the reply and, on success, run then."""
+        """Call one arming service without waiting; record the reply and, on success, run then.
+
+        Args:
+            client: std_srvs/SetBool service client.
+            value: Value to request (True arms, False disarms).
+            then: Callable run after a successful reply, or None.
+        """
         name = client.srv_name
         if not client.service_is_ready():
             self._reply(f"{name}: no service (is its node up, on domain {self.domain}?)", CRIT)
@@ -553,11 +623,19 @@ class Telemetry(Node):
         return img
 
     def _ease(self, f) -> float:
-        """An easing factor of f per EASE_S, for the time since the last full drawing."""
+        """Return an easing factor of f per EASE_S, for the time since the last full drawing.
+
+        Args:
+            f: Fraction of the remaining distance covered per EASE_S.
+        """
         return 1.0 - (1.0 - f) ** (self._dt / EASE_S)
 
     def render_frame(self, now=None) -> np.ndarray:
-        """The last full drawing with the camera panel drawn again: a new frame between the render_hz redraws."""
+        """Return the last full drawing with the camera panel redrawn, between render_hz redraws.
+
+        Args:
+            now: Monotonic time, in seconds; None uses the current time.
+        """
         now = time.monotonic() if now is None else now
         img = self._canvas.copy()
         self._draw_camera(img, now, self.states(now))
@@ -648,8 +726,14 @@ class Telemetry(Node):
             outlined(img, fit(line, w - 16, 0.5), x + 8, y + h - 12, colour, 0.5)
 
     def _draw_board(self, img, pose, ox, oy, k):
-        """Overlay the newest pose on the frame on show: its own, or (the pipeline taking ~50 ms)
-        the one before.
+        """Draw a pose's board outline, inner corners, origin and axes on the camera panel.
+
+        Args:
+            img: BGR canvas to draw on.
+            pose: Inference result whose pose is drawn.
+            ox: Canvas x of the camera frame's left edge, in pixels.
+            oy: Canvas y of the camera frame's top edge, in pixels.
+            k: Scale from camera pixels to canvas pixels.
         """
         pts = board_overlay(pose.pose.pose, self.overlay)
         if pts is None:
@@ -1022,7 +1106,11 @@ class Telemetry(Node):
             put(img, label, u - width(label, 0.38) // 2 if k else u - width(label, 0.38), top + 16, MUTED, 0.38)
 
     def _series_arrays(self, hist):
-        """The plots' arrays from one drawing's history: built once, and reused by the HUD copies' drawings."""
+        """Return the plots' arrays from one drawing's history, cached for the HUD copies.
+
+        Args:
+            hist: Stream key mapped to its list of (time, message) pairs.
+        """
         if self._series_cache[0] is not hist:
             est = hist.get("estimate", ())
             stage = hist.get("stage", ())
@@ -1098,8 +1186,10 @@ class Telemetry(Node):
 
 
 class HudPainter:
-    """The top-down and EKF/MPC panels without their background, as BGRA for a capture's HUD
-    videos, on a thread.
+    """Painter of the top-down and EKF/MPC panels as BGRA without background, on its own thread.
+
+    Args:
+        node: Telemetry node whose drawings the HUD copies follow.
     """
 
     _draw_topdown, _draw_series, _strip = Telemetry._draw_topdown, Telemetry._draw_series, Telemetry._strip
@@ -1153,7 +1243,12 @@ def stamp_ns(stamp) -> int:
 
 
 def run(node: Telemetry, stop: threading.Event | None = None) -> None:
-    """The draw loop, on the calling (main) thread: OpenCV's window must live there."""
+    """Run the draw loop on the calling (main) thread, where OpenCV's window must live.
+
+    Args:
+        node: Telemetry node to draw.
+        stop: Event that ends the loop when set, or None.
+    """
     writer, written, period = None, 0, 1.0 / node.render_hz
     next_draw = next_record = time.monotonic()
     next_snapshot, shown = 0.0, -1
@@ -1236,14 +1331,27 @@ def run(node: Telemetry, stop: threading.Event | None = None) -> None:
 
 
 def _key(node: Telemetry, key: int) -> bool:
-    """Handle a key: the space bar is STOP. Return whether the key quits."""
+    """Handle a key (the space bar is STOP) and return whether it quits.
+
+    Args:
+        node: Telemetry node to act on.
+        key: Key code from cv2.waitKey().
+    """
     if key in STOP_KEYS:
         node.act("stop")
     return key in QUIT_KEYS
 
 
 def _on_mouse(event, x, y, flags, node: Telemetry) -> None:
-    """A left click on a control-strip button runs its action. The window shows the canvas times scale."""
+    """Run the action of the control-strip button under a left click.
+
+    Args:
+        event: OpenCV mouse event.
+        x: Click x in window pixels (the canvas times scale).
+        y: Click y in window pixels (the canvas times scale).
+        flags: OpenCV mouse event flags.
+        node: Telemetry node to act on.
+    """
     if event != cv2.EVENT_LBUTTONDOWN:
         return
     k = node.scale or 1.0
@@ -1266,7 +1374,11 @@ def _spin(executor: SingleThreadedExecutor, stop: threading.Event) -> None:
 
 
 def main(args=None) -> None:
-    """Run the dashboard. A bad parameter ends it with "telemetry: <reason>" and exit status 1."""
+    """Run the dashboard; a bad parameter ends it with "telemetry: <reason>" and exit status 1.
+
+    Args:
+        args: Command-line arguments passed to rclpy.init().
+    """
     rclpy.init(args=args)
     try:
         node = Telemetry()

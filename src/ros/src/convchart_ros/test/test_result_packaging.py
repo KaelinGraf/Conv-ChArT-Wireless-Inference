@@ -45,7 +45,18 @@ def covariance(seed):
 
 def make_result(rvec=RVEC, tvec=TVEC, *, reason=None, ambiguous=False, n_identified=13,
                 n_unidentified=3, with_alt=True, with_cov=True):
-    """Build an InferenceResult shaped like the ones src/inference.py returns."""
+    """Build an InferenceResult shaped like the ones src/inference.py returns.
+
+    Args:
+        rvec: Rodrigues rotation vector of the pose.
+        tvec: Translation vector of the pose, in metres.
+        reason: Refusal reason, or None for a solved pose.
+        ambiguous: Whether the pose is flagged ambiguous.
+        n_identified: Number of identified corners.
+        n_unidentified: Number of unidentified corners.
+        with_alt: Whether the second IPPE solution is included.
+        with_cov: Whether the pose covariances are included.
+    """
     solved = reason is None
     alt = solved and with_alt
 
@@ -72,7 +83,12 @@ def make_result(rvec=RVEC, tvec=TVEC, *, reason=None, ambiguous=False, n_identif
 
 
 def expected_diagonal(tvec_z, square_m=SQUARE_M):
-    """Variances in PoseWithCovariance order (x, y, z, rot_x, rot_y, rot_z): translation first, in metres."""
+    """Return the variances in PoseWithCovariance order (x, y, z, rot_x, rot_y, rot_z), in metres.
+
+    Args:
+        tvec_z: Range of the board, in metres.
+        square_m: Board square length, in metres.
+    """
     z = tvec_z / square_m
     sigma = [a * z ** k for a, k in zip(NOISE_A, NOISE_K)]
     return np.array([s * square_m for s in sigma[3:]] + sigma[:3]) ** 2

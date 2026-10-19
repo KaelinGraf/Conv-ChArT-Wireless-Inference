@@ -67,7 +67,12 @@ def wait_until(condition, what, timeout=TIMEOUT_S):
 
 
 class Rig:
-    """Spin a probe node (stream subscriber, capture client) and the camera under test, if any."""
+    """Probe node (stream subscriber, capture client) spun with the camera under test, if any.
+
+    Args:
+        camera: FakeCamera under test, or None to probe an external camera.
+        prefix: Prefix of the 'image' and 'image_full_res' names.
+    """
 
     def __init__(self, camera=None, prefix=''):
         self.camera = camera
@@ -87,12 +92,16 @@ class Rig:
         self.frames.append((time.monotonic(), msg))
 
     def wait_for_frames(self, count):
-        """Wait until count stream frames have arrived; return the latest one."""
+        """Wait until count stream frames have arrived; return the latest one.
+
+        Args:
+            count: Number of frames to wait for.
+        """
         wait_until(lambda: len(self.frames) >= count, f'{count} stream frames')
         return self.frames[-1][1]
 
     def capture(self):
-        """Call 'image_full_res' once; return the reply and the call's (start, end) monotonic times."""
+        """Call 'image_full_res' once; return the reply and (start, end) monotonic times."""
         assert self.client.wait_for_service(timeout_sec=TIMEOUT_S), "no 'image_full_res' service"
         start = time.monotonic()
         future = self.client.call_async(GetFullResImage.Request(max_age=0.5))
@@ -136,7 +145,11 @@ def make_rig(ros):
 
 
 def decode(image):
-    """Decode a CompressedImage that must be a mono8 PNG."""
+    """Decode a CompressedImage that must be a mono8 PNG.
+
+    Args:
+        image: CompressedImage message.
+    """
     assert image.format == PNG_FORMAT
     data = np.frombuffer(image.data, dtype=np.uint8)
     assert data[:8].tobytes() == b'\x89PNG\r\n\x1a\n'
@@ -148,7 +161,15 @@ def decode(image):
 
 
 def corner_error(frame, spec, pose, k_full=DEFAULT_K_FULL, dist=DEFAULT_DIST):
-    """Median distance (px) from the corners detected in frame to a pose's projected corners."""
+    """Return the median distance (px) from the corners detected in frame to a pose's corners.
+
+    Args:
+        frame: Mono frame to detect in.
+        spec: Board in the frame.
+        pose: (rvec, tvec) of the board.
+        k_full: (3, 3) camera matrix.
+        dist: Distortion coefficients.
+    """
     board = make_board(spec)
     corners, ids, _, _ = cv2.aruco.CharucoDetector(board).detectBoard(frame)
     if ids is None:
@@ -161,12 +182,23 @@ def corner_error(frame, spec, pose, k_full=DEFAULT_K_FULL, dist=DEFAULT_DIST):
 
 
 def pose_error(camera, frame, index):
-    """Median distance (px) from the corners detected in frame to the camera's pose index."""
+    """Return the median distance (px) from the corners detected in frame to a camera pose.
+
+    Args:
+        camera: FakeCamera holding the poses and the true intrinsics.
+        frame: Mono frame to detect in.
+        index: Index into camera.poses.
+    """
     return corner_error(frame, camera.board_spec, camera.poses[index], camera.K_full, camera.dist)
 
 
 def stream_view(camera, index):
-    """Render a pose the way the stream shows it, with noise of its own."""
+    """Render a pose the way the stream shows it, with noise of its own.
+
+    Args:
+        camera: FakeCamera holding the poses and the true intrinsics.
+        index: Index into camera.poses.
+    """
     frame, _, _ = render_view(camera.board, camera.board_spec, camera.K_full, camera.dist,
                               *camera.poses[index], camera.full_size, seed=99)
     return cv2.resize(frame, camera.stream_size, interpolation=cv2.INTER_AREA)

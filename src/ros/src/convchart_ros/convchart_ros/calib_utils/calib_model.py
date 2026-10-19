@@ -40,15 +40,24 @@ _NO_DIST = np.zeros(5, dtype=np.float64)
 
 @dataclass(frozen=True)
 class BoardRange:
-    """The board centre's distance from the camera, in BOARD.square_length_m units (metres). @args:
-    z: depth along the optical axis. range: straight-line distance from the camera centre.
+    """Distance of the board centre from the camera, in BOARD.square_length_m units (metres).
+
+    Args:
+        z: Depth along the optical axis.
+        range: Straight-line distance from the camera centre.
     """
     z: float
     range: float
 
 
 def check_model_board(spec: BoardSpec) -> None:
-    """Raise ValueError unless spec has the model's board layout."""
+    """Raise ValueError unless spec has the model's board layout.
+
+    The square length is free; squares, marker ratio, dictionary, first id and pattern must match.
+
+    Args:
+        spec: Calibration board (CALIBRATION.board).
+    """
     model = MODEL_BOARD
     differences = []
     if tuple(spec.squares) != tuple(model.squares):
@@ -71,8 +80,13 @@ def check_model_board(spec: BoardSpec) -> None:
 
 
 class ModelDetector:
-    """The deployed model on calibration stills (corners) and on the live stream (the board's
-    range).
+    """Deployed model as the corner detector on stills and the board range finder on the stream.
+
+    Every call into the pipeline, its construction included, runs on one model thread.
+
+    Args:
+        cfg_path: Config whose MODEL block names the detector and refiner and whose BOARD block
+            gives the square length for board_range().
     """
 
     def __init__(self, cfg_path: str | os.PathLike):
@@ -95,6 +109,9 @@ class ModelDetector:
 
     def corners(self, frame: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         """Find the ChArUco corners in a frame of any resolution, without the config's K and dist.
+
+        Args:
+            frame: uint8 mono (H, W) or BGR (H, W, 3) image at its native resolution.
         """
         h, w = frame.shape[:2]
         f = float(max(w, h))
@@ -121,7 +138,11 @@ class ModelDetector:
     def board_range(self, frame: np.ndarray, K: np.ndarray,
                     dist: np.ndarray | None) -> BoardRange | None:
         """Return the board centre's distance from the camera by the pipeline's pose, else None.
-        @args: frame: uint8 mono or BGR frame at the resolution K belongs to.
+
+        Args:
+            frame: uint8 mono or BGR frame at the resolution K belongs to.
+            K: (3, 3) camera matrix at the frame's resolution.
+            dist: Distortion coefficients; None means none.
         """
         dist = _NO_DIST if dist is None else np.asarray(dist, dtype=np.float64)
         result = self._model_thread.submit(self._pipe.run_inference, frame,

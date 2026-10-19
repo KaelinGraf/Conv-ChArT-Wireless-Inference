@@ -11,8 +11,13 @@ Z_FITTED = (3.88, 70.67)
 
 
 def measurement_covariance(tvec_z: float, square_length_m: float) -> tuple[np.ndarray, bool]:
-    """(6x6 diagonal covariance in PoseWithCovariance order (x, y, z, rot_x, rot_y, rot_z),
-    in_fitted_range).
+    """Return (diagonal 6x6 covariance in PoseWithCovariance order, z within the fitted range).
+
+    Translation is in the units of square_length_m and rotation in rad^2; z is clamped to the fit.
+
+    Args:
+        tvec_z: Board range along the optical axis, in the units of square_length_m.
+        square_length_m: Board square length, in metres (1 for a board in units of squares).
     """
     z = float(tvec_z) / float(square_length_m)
     zc = min(max(z, Z_FITTED[0]), Z_FITTED[1])

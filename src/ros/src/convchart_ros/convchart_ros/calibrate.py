@@ -76,10 +76,14 @@ _PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 
 @dataclass(frozen=True)
 class Review:
-    """A capture's verdict, shown in review mode until `until`. @args: frame: the captured frame,
-    mono, full resolution. corners: (N, 2) ChArUco corners found in it, full-res pixels
-    (pixel-centre convention). kept: the capture became a calibration view. verdict: "KEPT" or
-    "REJECTED: <reason>". until: time.monotonic() at which the review ends.
+    """Verdict on a capture, shown in review mode until `until`.
+
+    Args:
+        frame: Captured frame, mono, full resolution.
+        corners: (N, 2) ChArUco corners found in it, full-res pixels (pixel-centre convention).
+        kept: The capture became a calibration view.
+        verdict: "KEPT" or "REJECTED: <reason>".
+        until: time.monotonic() at which the review ends.
     """
     frame: np.ndarray
     corners: np.ndarray
@@ -90,14 +94,17 @@ class Review:
 
 @dataclass(frozen=True)
 class GuiState:
-    """Snapshot of the node for one GUI frame: everything the window shows, plus the node's
-    activity. @args: frame: latest stream frame (mono), None until the first one arrives.
-    canvas_size: (W, H) of the window canvas: the stream frame size, (640, 480) until a frame
-    arrives. hud: HUD contents: counters, coverage %, status line, verdict (review mode),
-    message. coverage: (rows, cols) corner counts of the active views per coverage cell. review:
-    the latest capture while its review is showing, else None (live mode). capturing: a capture
-    request is in flight (sent, reply not yet handled). solving: a solve is running or queued.
-    solution: the latest solution (full resolution), None before the first solve.
+    """Snapshot of the node for one GUI frame: everything the window shows, plus its activity.
+
+    Args:
+        frame: Latest stream frame (mono), None until the first one arrives.
+        canvas_size: (W, H) of the window canvas: the stream frame size, else (640, 480).
+        hud: HUD contents: counters, coverage %, status line, verdict (review mode), message.
+        coverage: (rows, cols) corner counts of the active views per coverage cell.
+        review: Latest capture while its review is showing, else None (live mode).
+        capturing: A capture request is in flight (sent, reply not yet handled).
+        solving: A solve is running or queued.
+        solution: Latest solution (full resolution), None before the first solve.
     """
     frame: np.ndarray | None
     canvas_size: tuple[int, int]
@@ -111,13 +118,30 @@ class GuiState:
 
 @dataclass
 class _Pending:
-    """A capture request in flight."""
+    """Capture request in flight.
+
+    Args:
+        deadline: time.monotonic() after which the request is cancelled.
+        future: Service call future, None until the request is sent.
+    """
     deadline: float
     future: Future | None = None
 
 
 class CalibrateCam(Node):
-    """Ingest camera frames to calibrate the camera intrinsics and distortion coefficients."""
+    """Node that ingests camera frames to calibrate the camera intrinsics and distortion.
+
+    Constructor arguments are defaults for the ROS parameters of the same names; parameters win.
+
+    Args:
+        cfg_pth: Path to cfg.yaml; CALIBRATION sets the board and settings, CAMERA gets the result.
+        auto_replace: Write CAMERA.K, CAMERA.dist and CAMERA.image_size after every solve.
+        output_dir: Folder for the session folders; "" means <config dir>/../calibration_output.
+        capture_timeout_s: Seconds a capture request may take before it is cancelled.
+        capture_max_age_s: Oldest frame a capture accepts, in seconds; 0 accepts any frame.
+        detector: "model" (the config's MODEL, with distance readout) or "opencv" (any board).
+        resume: Earlier session folder to carry on in, "latest", or "" for a new session.
+    """
 
     def __init__(self, cfg_pth: str = "", auto_replace: bool = False, output_dir: str = "",
                  capture_timeout_s: float = 5.0, capture_max_age_s: float = 0.5,
@@ -264,9 +288,7 @@ class CalibrateCam(Node):
 
     @property
     def session_dir(self) -> Path:
-        """
-        Return this session's folder (calibration_log.yaml, frames/, the config backup).
-        """
+        """Return this session's folder (calibration_log.yaml, frames/, the config backup)."""
         return self._session_dir
 
     def request_capture(self) -> bool:
@@ -381,7 +403,10 @@ class CalibrateCam(Node):
         self._write_log()
 
     def _video_stream(self, msg: CompressedImage) -> None:
-        """Use the inference image stream to display the camera feed for calibration to the user.
+        """Keep the latest stream frame (mono), its arrival time and the stream size for display.
+
+        Args:
+            msg: Compressed frame from the 'image' stream.
         """
         frame = _decode(msg.data)
         if frame is None:
@@ -393,9 +418,7 @@ class CalibrateCam(Node):
             self._stream_size = (int(frame.shape[1]), int(frame.shape[0]))
 
     def _check_timeout(self) -> None:
-        """
-        Timer ("calib" group): cancel the request in flight once capture_timeout_s has passed.
-        """
+        """Cancel the capture request in flight once capture_timeout_s has passed."""
         message = f"capture timed out ({self._capture_timeout_s:g} s)"
         with self._lock:
             pending = self._pending
@@ -410,10 +433,13 @@ class CalibrateCam(Node):
         self.get_logger().warning(message)
 
     def _on_capture_reply(self, pending: _Pending, future: Future) -> None:
-        """
-        Done callback of a capture request: record the capture, start its review, queue a solve.
+        """Record a capture reply, start its review and queue a solve.
 
         Requests that timed out or that close() abandoned are ignored.
+
+        Args:
+            pending: Request the reply belongs to.
+            future: Completed service call future.
         """
         with self._views_lock:
             with self._lock:
@@ -443,7 +469,13 @@ class CalibrateCam(Node):
 
     def _record_capture(self, response: GetFullResImage.Response
                         ) -> tuple[np.ndarray | None, Detection | None, str | None]:
-        """Decode, evaluate and submit one capture reply and save its PNG."""
+        """Decode, evaluate and submit one capture reply and save its PNG.
+
+        Returns (frame, detection, message); message is None when all went well.
+
+        Args:
+            response: GetFullResImage reply.
+        """
         if not response.success:
             return None, None, f"capture failed: {response.message or 'no reason given'}"
         data = np.frombuffer(response.image.data, dtype=np.uint8)
@@ -486,7 +518,13 @@ class CalibrateCam(Node):
                     self._solving = False
 
     def _restore(self, saved: SavedSession) -> tuple[dict[int, str], int]:
-        """Re-detect an earlier session's kept views and submit them under their own indices."""
+        """Re-detect an earlier session's kept views and submit them under their own indices.
+
+        Returns (view files by index, number of views rejected on re-detection).
+
+        Args:
+            saved: Earlier session to resume.
+        """
         view_files: dict[int, str] = {}
         now_rejected = unreadable = 0
         for index, name, dropped in saved.views:
@@ -530,16 +568,18 @@ class CalibrateCam(Node):
             self._range_stop.wait(max(0.0, _RANGE_PERIOD_S - (time.monotonic() - started)))
 
     def _camera_at(self, size: tuple[int, int]) -> tuple[np.ndarray, np.ndarray]:
-        """Return the config's CAMERA K and dist for frames of size (W, H)."""
+        """Return the config's CAMERA K and dist for frames of size (W, H).
+
+        Args:
+            size: (W, H) of the frames.
+        """
         K, dist, camera_size = self._camera
         if camera_size is not None and camera_size != size:
             K = scale_intrinsics(K, camera_size, size)
         return K, dist
 
     def _solve_and_write(self) -> None:
-        """
-        Solve, then write the config's CAMERA block (auto_replace) and the log.
-        """
+        """Solve, then write the config's CAMERA block (auto_replace) and the log."""
         try:
             solution = self._session.solve()
         except RuntimeError:
@@ -560,7 +600,11 @@ class CalibrateCam(Node):
         self._write_log()
 
     def _write_camera(self, solution: Solution) -> None:
-        """Write the solution at stream resolution into the config's CAMERA block."""
+        """Write the solution at stream resolution into the config's CAMERA block.
+
+        Args:
+            solution: Full-resolution solution to write.
+        """
         with self._lock:
             stream_size = self._stream_size
         if stream_size is None:
@@ -581,9 +625,7 @@ class CalibrateCam(Node):
             self._config_written = True
 
     def _write_log(self) -> None:
-        """
-        Write calibration_log.yaml for the session as it is now.
-        """
+        """Write calibration_log.yaml for the session in its current state."""
         backup = str(self._backup_path) if self._backup_path.exists() else None
         with self._lock:
             meta = {"started": self._started, "config": str(self._config_path),
@@ -603,8 +645,12 @@ class CalibrateCam(Node):
 
     def _status(self, active: int, solving: bool,
                 solution: Solution | None) -> tuple[str, bool]:
-        """
-        Return the HUD status line and whether it reports a converged solution.
+        """Return the HUD status line and whether it reports a converged solution.
+
+        Args:
+            active: Number of active views.
+            solving: A solve is running or queued.
+            solution: Latest solution, None before the first solve.
         """
         min_views = self._settings.min_views
         if solution is None and solving:
@@ -623,19 +669,35 @@ class CalibrateCam(Node):
         return " | ".join(parts), solution.converged
 
     def _set_message(self, text: str, now: float) -> None:
-        """Show text as the HUD's transient message; the caller holds the lock."""
+        """Show text as the HUD's transient message; the caller holds the lock.
+
+        Args:
+            text: Message text.
+            now: time.monotonic() at which it is shown.
+        """
         self._message = text
         self._message_until = now + _MESSAGE_S
 
     def _report(self, text: str, error: bool = False) -> None:
-        """Log text and show it as the HUD's message; the caller must not hold the lock."""
+        """Log text and show it as the HUD's message; the caller must not hold the lock.
+
+        Args:
+            text: Message text.
+            error: Log as an error instead of a warning.
+        """
         (self.get_logger().error if error else self.get_logger().warning)(text)
         with self._lock:
             self._set_message(text, time.monotonic())
 
 
 def run_gui(node: CalibrateCam) -> None:
-    """Show the calibration window until the user quits; main thread only."""
+    """Show the calibration window until it is quit; main thread only.
+
+    Keys: SPACE capture, U undo, M coverage map, D distance readout, Q or ESC quit.
+
+    Args:
+        node: Calibration node, spun by an executor on another thread.
+    """
     if threading.current_thread() is not threading.main_thread():
         raise RuntimeError("run_gui must run on the main thread")
     show_coverage = True
@@ -676,8 +738,12 @@ def run_gui(node: CalibrateCam) -> None:
 
 
 def main(args: list[str] | None = None) -> None:
-    """Run the calibration GUI: the node spins in a background thread, the window on the main
-    thread.
+    """Run the calibration GUI: the node spins in a background thread, the window on the main one.
+
+    ROS parameters: config (required), auto_replace, output_dir, capture_*, detector, resume.
+
+    Args:
+        args: Command-line arguments for rclpy.init; None uses sys.argv.
     """
     rclpy.init(args=args)
     try:
@@ -708,8 +774,12 @@ def main(args: list[str] | None = None) -> None:
 
 
 def _compose(state: GuiState, show_coverage: bool, show_distance: bool = True) -> np.ndarray:
-    """
-    Return the window canvas: review mode while a capture's review is showing, else live mode.
+    """Return the window canvas: review mode while a capture's review is showing, else live mode.
+
+    Args:
+        state: GUI snapshot to draw.
+        show_coverage: Draw the coverage map in live mode.
+        show_distance: Draw the distance readout in live mode.
     """
     review = state.review
     if review is not None:
@@ -720,10 +790,12 @@ def _compose(state: GuiState, show_coverage: bool, show_distance: bool = True) -
 
 
 def _camera_from_cfg(cfg: dict) -> tuple[np.ndarray, np.ndarray, tuple[int, int] | None] | None:
-    """
-    Return the config's CAMERA block as (K, dist, image_size), None without a K.
+    """Return the config's CAMERA block as (K, dist, image_size), None without a K.
 
     A missing dist means none; a missing image_size means K is at the stream's resolution.
+
+    Args:
+        cfg: Loaded config mapping.
     """
     camera = cfg.get("CAMERA") or {}
     if camera.get("K") is None:
@@ -735,7 +807,14 @@ def _camera_from_cfg(cfg: dict) -> tuple[np.ndarray, np.ndarray, tuple[int, int]
 
 
 def _check_saved_board(saved: SavedSession, spec: BoardSpec) -> None:
-    """Raise ValueError when the saved session's log names a board other than spec's layout."""
+    """Raise ValueError when the saved session's log names a board other than spec's layout.
+
+    The square length may differ; a session without a log is not checked.
+
+    Args:
+        saved: Earlier session to resume.
+        spec: Board of the current settings.
+    """
     board = (saved.log or {}).get("board")
     if not isinstance(board, dict):
         return
@@ -756,7 +835,12 @@ def _check_saved_board(saved: SavedSession, spec: BoardSpec) -> None:
 
 
 def _spin(executor: MultiThreadedExecutor, stop: threading.Event) -> None:
-    """Spin executor until stop is set or ROS shuts down; the body of main()'s executor thread."""
+    """Spin executor until stop is set or ROS shuts down; the body of main()'s executor thread.
+
+    Args:
+        executor: Executor holding the node.
+        stop: Event set to end the loop.
+    """
     while not stop.is_set() and executor.context.ok():
         try:
             executor.spin_once(timeout_sec=_SPIN_WAIT_S)
@@ -767,13 +851,19 @@ def _spin(executor: MultiThreadedExecutor, stop: threading.Event) -> None:
 
 
 def _key_code(code: int) -> int:
-    """Return the key a cv2.waitKeyEx() code stands for: its low 16 bits, or -1 for no key."""
+    """Return the key a cv2.waitKeyEx() code stands for: its low 16 bits, or -1 for no key.
+
+    Args:
+        code: Value returned by cv2.waitKeyEx().
+    """
     return -1 if code == -1 else code & 0xFFFF
 
 
 def _decode(data) -> np.ndarray | None:
-    """
-    Decode an image message's bytes to a mono uint8 frame; None if they hold no image.
+    """Decode an image message's bytes to a mono uint8 frame; None if they hold no image.
+
+    Args:
+        data: Encoded image bytes of a CompressedImage message.
     """
     buffer = np.frombuffer(data, dtype=np.uint8)
     if buffer.size == 0:
@@ -785,8 +875,12 @@ def _decode(data) -> np.ndarray | None:
 
 
 def _save_png(path: Path, data: np.ndarray, frame: np.ndarray) -> None:
-    """
-    Save a capture as PNG: the camera's own bytes when they are PNG, else frame re-encoded.
+    """Save a capture as PNG: the camera's own bytes when they are PNG, else frame re-encoded.
+
+    Args:
+        path: Destination file.
+        data: Encoded image bytes from the camera.
+        frame: Decoded frame, re-encoded when data is not PNG.
     """
     if data[:len(_PNG_SIGNATURE)].tobytes() != _PNG_SIGNATURE:
         ok, encoded = cv2.imencode(".png", frame)
@@ -797,10 +891,13 @@ def _save_png(path: Path, data: np.ndarray, frame: np.ndarray) -> None:
 
 
 def _new_session_dir(root: Path, started: datetime) -> Path:
-    """
-    Create and return <root>/<YYYYmmdd-HHMMSS>/ with its frames/ folder.
+    """Create and return <root>/<YYYYmmdd-HHMMSS>/ with its frames/ folder.
 
     A session started in the same second as another gets a -2, -3, ... suffix.
+
+    Args:
+        root: Folder that holds the session folders.
+        started: Session start time, naming the folder.
     """
     root.mkdir(parents=True, exist_ok=True)
     stamp = started.strftime("%Y%m%d-%H%M%S")

@@ -100,7 +100,11 @@ def idle(node):
 
 
 def settled(node):
-    """Idle and back in live mode: no capture, no solve, no review showing."""
+    """Check the node is idle and back in live mode: no capture, no solve, no review showing.
+
+    Args:
+        node: CalibrateCam under test.
+    """
     state = node.state()
     return not state.capturing and not state.solving and state.review is None
 
@@ -110,7 +114,11 @@ def wait_for_stream(node):
 
 
 def capture(node):
-    """Capture as the SPACE key does and wait until the node has handled the reply."""
+    """Capture as the SPACE key does and wait until the node has handled the reply.
+
+    Args:
+        node: CalibrateCam under test.
+    """
     before = counts(node.state())
     wait_until(node.request_capture, 'the node to take a capture request')
     wait_until(lambda: not node.state().capturing, 'the capture reply to be handled')
@@ -130,14 +138,24 @@ def read_log(session_dir):
 
 
 def ground_truth_corners(camera, pose_index):
-    """Project the camera's chessboard corners for one pose with its true K and dist."""
+    """Project the camera's chessboard corners for one pose with its true K and dist.
+
+    Args:
+        camera: FakeCamera holding the poses and the true intrinsics.
+        pose_index: Index into camera.poses.
+    """
     rvec, tvec = camera.poses[pose_index]
     points = np.asarray(camera.board.getChessboardCorners(), dtype=np.float64)
     return cv2.projectPoints(points, rvec, tvec, camera.K_full, camera.dist)[0].reshape(-1, 2)
 
 
 def distortion_error_px(camera, dist):
-    """Return the largest image displacement (px) between dist and the camera's true distortion."""
+    """Return the largest image displacement (px) between dist and the camera's true distortion.
+
+    Args:
+        camera: FakeCamera holding the poses and the true intrinsics.
+        dist: Estimated distortion coefficients.
+    """
     points = np.asarray(camera.board.getChessboardCorners(), dtype=np.float64)
     worst = 0.0
     for rvec, tvec in camera.poses:
@@ -150,8 +168,13 @@ def distortion_error_px(camera, dist):
 
 
 def spin_in_thread(node, num_threads):
-    """Spin node in a MultiThreadedExecutor on a background thread; return a function that stops
-    it.
+    """Spin node in a MultiThreadedExecutor on a background thread; return a function to stop it.
+
+    The stop function ends the loop and waits for running callbacks before shutting down.
+
+    Args:
+        node: Node to spin.
+        num_threads: Executor thread count.
     """
     executor = MultiThreadedExecutor(num_threads=num_threads)
     executor.add_node(node)
@@ -175,10 +198,14 @@ def spin_in_thread(node, num_threads):
 
 
 class Rig:
-    """
-    Spin a CalibrateCam and a FakeCamera, each in a MultiThreadedExecutor on a background thread.
+    """CalibrateCam and FakeCamera, each spun in a MultiThreadedExecutor on a background thread.
 
     The camera has an executor of its own so it can be replaced while the node keeps spinning.
+
+    Args:
+        camera: FakeCamera to spin.
+        node: CalibrateCam to spin.
+        config: Path of the config the node uses.
     """
 
     def __init__(self, camera, node, config):
@@ -189,7 +216,11 @@ class Rig:
         self._stop_camera = spin_in_thread(camera, num_threads=3)
 
     def replace_camera(self, make_camera):
-        """Stop the camera, destroy it and start the one make_camera() makes in its place."""
+        """Stop the camera, destroy it and start the one make_camera() makes in its place.
+
+        Args:
+            make_camera: Callable returning the new FakeCamera.
+        """
         self._stop_camera()
         self.camera.destroy_node()
         self.camera = make_camera()
@@ -204,10 +235,15 @@ class Rig:
 
 
 def start_rig(tmp_path, calibration, camera_args=None, **node_args):
-    """
-    Write a config with this CALIBRATION block and start a camera with its board and a node.
+    """Write a config with this CALIBRATION block and start a camera with its board and a node.
 
     The node detects with OpenCV unless node_args say otherwise.
+
+    Args:
+        tmp_path: Folder for the config and the session output.
+        calibration: CALIBRATION block of the config.
+        camera_args: Extra FakeCamera arguments, or None.
+        **node_args: Extra CalibrateCam arguments.
     """
     config = write_config(tmp_path / 'cfg' / 'cfg.yaml', calibration)
     camera = FakeCamera(board_spec=board_spec_from_cfg(calibration.get('board')),
@@ -254,7 +290,20 @@ def make_rig(ros, tmp_path):
 
 @dataclass
 class Run:
-    """A complete calibration session, captured and closed, with what it left behind."""
+    """Complete calibration session, captured and closed, with what it left behind.
+
+    Args:
+        camera: FakeCamera the session captured from.
+        config: Path of the config.
+        original: Config bytes before the session.
+        session_dir: Session folder.
+        auto_replace: The node's auto_replace setting.
+        board: CALIBRATION.board block ({} for the default board).
+        first_solve: Config, log and backup stat right after the first solve.
+        state: GUI state after the last solve and review.
+        last_solve: Log after the last solve.
+        log_text: Final calibration_log.yaml text.
+    """
 
     camera: FakeCamera
     config: Path
@@ -273,7 +322,15 @@ class Run:
 
 
 def full_session(tmp_path, auto_replace, board, blank_every, n_captures):
-    """Run a whole calibration session and return it as a Run."""
+    """Run a whole calibration session and return it as a Run.
+
+    Args:
+        tmp_path: Folder for the config and the session output.
+        auto_replace: The node's auto_replace setting.
+        board: CALIBRATION.board block, or None for the default board.
+        blank_every: Every Nth capture is blank; 0 means never.
+        n_captures: Number of captures taken.
+    """
     calibration = {'board': board, 'review_s': 0.05} if board else {'review_s': 0.05}
     rig = start_rig(tmp_path, calibration, {'blank_every': blank_every},
                     auto_replace=auto_replace)
@@ -301,14 +358,14 @@ def full_session(tmp_path, auto_replace, board, blank_every, n_captures):
 
 @pytest.fixture(scope='module')
 def replace_run(ros, tmp_path_factory):
-    """auto_replace=True on the default (dcc) board; every 5th capture is blank."""
+    """Run a session with auto_replace on the default board, every 5th capture blank."""
     return full_session(tmp_path_factory.mktemp('replace'), auto_replace=True, board=None,
                         blank_every=5, n_captures=20)
 
 
 @pytest.fixture(scope='module')
 def keep_run(ros, tmp_path_factory):
-    """auto_replace=False on a user-specified 7x5 DICT_4X4_50 board with marker ids from 10."""
+    """Run a session without auto_replace on a custom 7x5 DICT_4X4_50 board, ids from 10."""
     return full_session(tmp_path_factory.mktemp('keep'), auto_replace=False, board=CUSTOM_BOARD,
                         blank_every=0, n_captures=20)
 
@@ -367,7 +424,7 @@ def test_ros_parameters_configure_the_node_as_main_does(ros, tmp_path):
 
 
 def repo_model():
-    """The repo's MODEL block with absolute paths; None without onnxruntime or the checkpoints."""
+    """Return the repo's MODEL block, paths absolute; None without onnxruntime or checkpoints."""
     repo = find_repo(Path(__file__))
     if repo is None or importlib.util.find_spec('onnxruntime') is None:
         return None
@@ -792,8 +849,11 @@ def test_undo_renames_the_view_and_solves_again(make_rig):
 
 
 class FakeWindow:
-    """Stand-ins for OpenCV's window functions, so run_gui runs as if on a display but nothing
-    opens.
+    """Stand-ins for OpenCV's window functions, so run_gui runs as on a display but opens nothing.
+
+    Args:
+        keys: Key codes waitKeyEx returns in turn (-1 once they run out).
+        closed_after: Number of shown canvases after which the window reports closed, or None.
     """
 
     def __init__(self, keys=(), closed_after=None):
@@ -871,7 +931,7 @@ def test_run_gui_drives_the_node_from_the_keys(make_rig, monkeypatch):
     steps = []
 
     def keys():
-        """Press keys the way a user would, waiting for the node between them."""
+        """Yield key codes in turn, waiting for the node to react between them."""
         state = node.state
         while not (state().capturing or state().review is not None):
             yield ord(' ')
@@ -1018,10 +1078,13 @@ def test_spin_loop_ends_quietly_when_ros_shuts_down(ros):
 
 
 def patch_main(monkeypatch, make_node):
-    """
-    Let main() run in this process on the node make_node() builds; return its list of events.
+    """Let main() run in this process on the node make_node() builds; return its list of events.
 
     rclpy.init and rclpy.try_shutdown only record themselves there, so the tests' context stays up.
+
+    Args:
+        monkeypatch: pytest monkeypatch fixture.
+        make_node: Callable building the node main() runs.
     """
     events = []
     monkeypatch.setattr(rclpy, 'init', lambda args=None: events.append('init'))

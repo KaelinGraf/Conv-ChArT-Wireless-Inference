@@ -40,13 +40,19 @@ _FRAME_FILE = re.compile(r"(view|rejected|undone)_(\d+)\.png")
 
 @dataclass(frozen=True)
 class CalibrationSettings:
-    """Settings of one calibration session: the CALIBRATION block of the config. @args: board: the
-    physical ChArUco board. min_corners: fewest ChArUco corners a kept view needs; None means
-    max(6, ceil(0.5 * inner corners)), see min_corners_resolved. min_views: active views needed
-    before the first solve. review_s: seconds a capture's verdict stays on screen.
-    outlier_factor: a solve drops views whose reprojection error exceeds this times the median
-    and outlier_floor_px. outlier_floor_px: the error a view must also exceed to be dropped
-    (full-resolution pixels).
+    """Settings of one calibration session: the CALIBRATION block of the config.
+
+    Args:
+        board: Physical ChArUco board.
+        min_corners: Fewest ChArUco corners a kept view needs; None means min_corners_resolved.
+        min_views: Active views needed before the first solve.
+        review_s: Seconds a capture's verdict stays on screen.
+        outlier_factor: A view is dropped if its error exceeds this times the median and the floor.
+        outlier_floor_px: Error a view must also exceed to be dropped, in full-resolution pixels.
+        fix_k3: Hold k3 at 0 instead of estimating it.
+        coverage_grid: (rows, cols) of the coverage map over the full frame.
+        converge_rel_sigma_f: Bound on sigma(fx)/fx and sigma(fy)/fy for convergence.
+        converge_sigma_c_px: Bound on sigma(cx) and sigma(cy) for convergence, in full-res pixels.
     """
     board: BoardSpec = BoardSpec()
     min_corners: int | None = None
@@ -67,7 +73,13 @@ class CalibrationSettings:
 
 
 def settings_from_cfg(cfg: dict[str, Any] | None) -> CalibrationSettings:
-    """Build CalibrationSettings from the CALIBRATION block of a loaded config."""
+    """Build CalibrationSettings from the CALIBRATION block of a loaded config.
+
+    Missing or null keys keep the defaults; unknown keys raise ValueError.
+
+    Args:
+        cfg: Whole config mapping (yaml.safe_load of cfg.yaml); only CALIBRATION is read.
+    """
     block = (cfg or {}).get("CALIBRATION") or {}
     if not isinstance(block, dict):
         raise ValueError(f"CALIBRATION must be a mapping, got {type(block).__name__}")
@@ -97,13 +109,16 @@ def settings_from_cfg(cfg: dict[str, Any] | None) -> CalibrationSettings:
 
 @dataclass
 class Detection:
-    """The board found in one capture, and whether the view is usable for calibration. @args: kept:
-    the view passed every check. reason: "" when kept; else REJECT_NO_BOARD, "too few corners
-    (n/min)" or REJECT_COLLINEAR. corners: (N, 2) float64 ChArUco corners in full-res pixels
-    (pixel-centre convention); empty when no board was found. ids: (N,) ChArUco corner ids,
-    row-major over the inner-corner grid. image_size: (W, H) of the frame. obj_points: (N, 3)
-    float32 board coordinates of the corners when kept, else None. img_points: (N, 2) float32
-    image coordinates of the corners when kept, else None.
+    """Board found in one capture, and whether the view is usable for calibration.
+
+    Args:
+        kept: The view passed every check.
+        reason: "" when kept; else REJECT_NO_BOARD, "too few corners (n/min)" or REJECT_COLLINEAR.
+        corners: (N, 2) float64 corners in full-res pixels (pixel-centre); empty without a board.
+        ids: (N,) ChArUco corner ids, row-major over the inner-corner grid.
+        image_size: (W, H) of the frame.
+        obj_points: (N, 3) float32 board coordinates of the corners when kept, else None.
+        img_points: (N, 2) float32 image coordinates of the corners when kept, else None.
     """
     kept: bool
     reason: str
@@ -116,8 +131,18 @@ class Detection:
 
 @dataclass
 class Solution:
-    """Result of one solve, at full resolution. @args: rms: overall RMS reprojection error in
-    pixels.
+    """Result of one solve, at full resolution.
+
+    Args:
+        rms: Overall RMS reprojection error in pixels.
+        K: (3, 3) camera matrix.
+        dist: (5,) distortion coefficients (k1, k2, p1, p2, k3).
+        std: Standard deviations of fx fy cx cy k1 k2 p1 p2 k3 (0 for a fixed parameter).
+        per_view_errors: View index -> RMS reprojection error in pixels, for the views solved over.
+        n_views: Number of views solved over.
+        dropped: Indices of the views this solve dropped as outliers.
+        image_size: (W, H) the solution belongs to.
+        converged: The standard deviations meet the settings' convergence thresholds.
     """
     rms: float
     K: np.ndarray
@@ -132,7 +157,17 @@ class Solution:
 
 @dataclass
 class _View:
-    """A kept view. The point arrays never change after submit(); the rest only under the lock."""
+    """Kept view; the point arrays never change after submit(), the rest only under the lock.
+
+    Args:
+        index: View index, unique within the session.
+        obj_points: (N, 3) float32 board coordinates of the corners.
+        img_points: (N, 2) float32 image coordinates of the corners.
+        corners: (N, 2) float64 corners in full-res pixels.
+        image_size: (W, H) of the frame.
+        dropped: The last solve dropped this view as an outlier.
+        error_px: RMS reprojection error of the view in pixels; None before a solve.
+    """
     index: int
     obj_points: np.ndarray
     img_points: np.ndarray
@@ -143,7 +178,14 @@ class _View:
 
 
 class CalibrationSession:
-    """One calibration run: checks captures, keeps the usable ones and solves over them."""
+    """Calibration run that checks captures, keeps the usable ones and solves over them.
+
+    View indices are never reused; one internal lock guards views, counters, solution and history.
+
+    Args:
+        settings: Session settings; the board and the counts are validated here (ValueError).
+        detect: Corner detector for evaluate(), e.g. ModelDetector.corners; None uses OpenCV's.
+    """
 
     def __init__(self, settings: CalibrationSettings, detect: CornerDetector | None = None):
         make_board(settings.board)
@@ -168,7 +210,11 @@ class CalibrationSession:
         self._history: list[dict[str, Any]] = []
 
     def evaluate(self, frame: np.ndarray) -> Detection:
-        """Detect the board in a full-resolution frame and check the view is usable."""
+        """Detect the board in a full-resolution frame and check the view is usable.
+
+        Args:
+            frame: Mono (H, W) or BGR (H, W, 3) uint8 image; colour is converted to grey.
+        """
         gray = _to_gray(frame)
         size = (int(gray.shape[1]), int(gray.shape[0]))
         board = make_board(self._settings.board)
@@ -200,8 +246,12 @@ class CalibrationSession:
 
     def submit(self, det: Detection, index: int | None = None,
                dropped: bool = False) -> int | None:
-        """Record an evaluated capture; return the new view's index, or None for a rejected
-        capture.
+        """Record an evaluated capture; return the new view's index, or None if it is rejected.
+
+        Args:
+            det: Result of evaluate().
+            index: Index of a view restored from an earlier session; None gives the next one.
+            dropped: Restore the view as dropped by an earlier solve, so solves leave it out.
         """
         size = (int(det.image_size[0]), int(det.image_size[1]))
         if not det.kept:
@@ -233,11 +283,12 @@ class CalibrationSession:
 
     def carry_over(self, rejected: int = 0, next_index: int = 0,
                    history: list[dict[str, Any]] | None = None) -> None:
-        """Take on what an earlier session counted, when resuming it. @args: rejected: its rejected
-        captures, added to the count. next_index: the first view index it never used; later
-        views are numbered from here (or from above the views already restored, whichever is
-        higher). history: its solves as the log lists them ({n_views, rms_px, fx, fy, cx, cy}),
-        put before this session's own.
+        """Take on what an earlier session counted, when resuming it.
+
+        Args:
+            rejected: Rejected captures of the earlier session, added to the count.
+            next_index: First view index the earlier session never used; later views start here.
+            history: Earlier solves as the log lists them, put before this session's own.
         """
         earlier = [{"n_views": int(entry["n_views"]), "rms": float(entry["rms_px"]),
                     **{key: float(entry[key]) for key in ("fx", "fy", "cx", "cy")}}
@@ -248,9 +299,7 @@ class CalibrationSession:
             self._history[:0] = earlier
 
     def undo(self) -> int | None:
-        """
-        Remove the last kept view, active or dropped, and return its index (None if there is none).
-        """
+        """Remove the last kept view, active or dropped, and return its index (None if none)."""
         with self._lock:
             return self._views.pop().index if self._views else None
 
@@ -342,24 +391,18 @@ class CalibrationSession:
         return solution
 
     def coverage(self) -> np.ndarray:
-        """
-        Count the active views' corners per cell of a (rows, cols) grid spanning the full frame.
-        """
+        """Count the active views' corners per cell of a (rows, cols) grid over the full frame."""
         with self._lock:
             active = [(v.corners, v.image_size) for v in self._views if not v.dropped]
         return _coverage_grid(active, self._settings.coverage_grid)
 
     def coverage_fraction(self) -> float:
-        """
-        Return the fraction of coverage cells holding at least one corner.
-        """
+        """Return the fraction of coverage cells holding at least one corner."""
         grid = self.coverage()
         return float(np.count_nonzero(grid)) / grid.size
 
     def _log_snapshot(self) -> dict[str, Any]:
-        """
-        Take everything build_log reports under one lock, so the parts agree with each other.
-        """
+        """Take everything build_log reports under one lock, so the parts agree with each other."""
         with self._lock:
             return {
                 "views": [(v.index, len(v.obj_points), v.error_px, v.dropped)
@@ -400,7 +443,15 @@ def charuco_offset_px() -> float:
 
 def scale_intrinsics(K: np.ndarray, full_size: tuple[int, int],
                      target_size: tuple[int, int]) -> np.ndarray:
-    """Scale a camera matrix to a uniformly resized image of the same view."""
+    """Scale a camera matrix to a uniformly resized image of the same view.
+
+    Pixel-centre convention: fx' = s * fx, cx' = s * (cx + 0.5) - 0.5; distortion is unchanged.
+
+    Args:
+        K: (3, 3) camera matrix at full_size.
+        full_size: (W, H) that K belongs to.
+        target_size: (W, H) to scale K to.
+    """
     full_w, full_h = full_size
     target_w, target_h = target_size
     if min(full_w, full_h, target_w, target_h) <= 0:
@@ -422,12 +473,14 @@ def scale_intrinsics(K: np.ndarray, full_size: tuple[int, int],
 
 @dataclass(frozen=True)
 class SavedSession:
-    """What an earlier session left in its folder, read to resume it (read_saved_session). @args:
-    folder: the session folder. views: (index, file, dropped) of its kept views, by index: file
-    relative to folder, dropped as its log says (False without a log). rejected: its rejected
-    captures, from the numbering of frames/rejected_NNN.png. next_index: the first view index it
-    never used: above its views, its undone views and the views its log lists. log: its
-    calibration_log.yaml, None when it has none.
+    """Contents of an earlier session's folder, read to resume it (read_saved_session).
+
+    Args:
+        folder: Session folder.
+        views: (index, file, dropped) of its kept views, by index; file relative to folder.
+        rejected: Its rejected captures, from the numbering of frames/rejected_NNN.png.
+        next_index: First view index it never used.
+        log: Its calibration_log.yaml, None when it has none.
     """
     folder: Path
     views: list[tuple[int, str, bool]]
@@ -437,7 +490,11 @@ class SavedSession:
 
 
 def read_saved_session(folder: str | os.PathLike) -> SavedSession:
-    """Read what an earlier session left in folder, to resume it."""
+    """Read what an earlier session left in folder, to resume it.
+
+    Args:
+        folder: Session folder, <output_dir>/<YYYYmmdd-HHMMSS>.
+    """
     folder = Path(folder)
     if not (folder / "frames").is_dir():
         raise ValueError(f"{folder} is not a calibration session folder (no frames/)")
@@ -472,6 +529,9 @@ def read_saved_session(folder: str | os.PathLike) -> SavedSession:
 
 def latest_saved_session(root: str | os.PathLike) -> Path | None:
     """Return the newest session folder under root that holds a kept view, None if there is none.
+
+    Args:
+        root: output_dir that holds the session folders, named by start time.
     """
     root = Path(root)
     if not root.is_dir():
@@ -483,7 +543,13 @@ def latest_saved_session(root: str | os.PathLike) -> Path | None:
 
 def build_log(session: CalibrationSession, settings: CalibrationSettings,
               meta: dict[str, Any] | None) -> dict[str, Any]:
-    """Build the calibration log document (plain Python types, ready for write_log)."""
+    """Build the calibration log document (plain Python types, ready for write_log).
+
+    Args:
+        session: Session to report.
+        settings: Session settings (for the board block).
+        meta: Optional session facts: started, config, stream_size, view_files and the like.
+    """
     meta = meta or {}
     snap = session._log_snapshot()
     sol: Solution | None = snap["solution"]
@@ -559,8 +625,10 @@ def build_log(session: CalibrationSession, settings: CalibrationSettings,
 
 def write_log(path: str | os.PathLike, log: dict[str, Any]) -> None:
     """Write the log as YAML atomically, so a reader sees the old log or the new one, never half.
-    @args: path: the log file; its directory is created if missing. log: the document from
-    build_log (plain Python types only).
+
+    Args:
+        path: Log file; its directory is created if missing.
+        log: Document from build_log (plain Python types only).
     """
     _atomic_write(Path(path), _dump_yaml(log).encode("utf-8"))
 
@@ -568,7 +636,17 @@ def write_log(path: str | os.PathLike, log: dict[str, Any]) -> None:
 def write_camera_to_cfg(cfg_path: str | os.PathLike, K: np.ndarray, dist: np.ndarray,
                         image_size: tuple[int, int],
                         backup_path: str | os.PathLike | None = None) -> None:
-    """Write K, dist and image_size into the CAMERA block of a YAML config."""
+    """Write K, dist and image_size into the CAMERA block of a YAML config.
+
+    One-line entries are replaced in place, keeping comments; otherwise the file is re-dumped.
+
+    Args:
+        cfg_path: Config to update.
+        K: (3, 3) camera matrix belonging to image_size.
+        dist: Distortion coefficients (k1, k2, p1, p2, k3).
+        image_size: (W, H) that K belongs to.
+        backup_path: Where to keep a copy of the original config, unless that file exists.
+    """
     cfg_path = Path(os.path.realpath(cfg_path))
     original = cfg_path.read_bytes()
     cfg = yaml.safe_load(original.decode("utf-8")) or {}
@@ -597,7 +675,14 @@ def write_camera_to_cfg(cfg_path: str | os.PathLike, K: np.ndarray, dist: np.nda
 
 
 def _camera_lines_replaced(text: str, values: dict[str, Any]) -> str | None:
-    """Return text with the CAMERA block's one-line K, dist and image_size replaced by values."""
+    """Return text with the CAMERA block's one-line K, dist and image_size replaced by values.
+
+    None when the block or any of the three one-line entries is missing.
+
+    Args:
+        text: Config file text.
+        values: New K, dist and image_size, by key.
+    """
     lines = text.splitlines(keepends=True)
     start = next((i for i, line in enumerate(lines)
                   if re.match(r"CAMERA:\s*(#.*)?$", line.rstrip("\r\n"))), None)
@@ -631,10 +716,15 @@ def _to_gray(frame: np.ndarray) -> np.ndarray:
 def _calibrate(views: list[tuple[int, np.ndarray, np.ndarray]], size: tuple[int, int],
                guess: tuple[np.ndarray, np.ndarray] | None,
                flags: int) -> tuple[float, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """
-    Run cv2.calibrateCameraExtended over (index, obj_points, img_points) views.
+    """Run cv2.calibrateCameraExtended over (index, obj_points, img_points) views.
 
     Returns rms, K (3, 3), dist (5,), the std of fx fy cx cy k1 k2 p1 p2 k3, and per-view errors.
+
+    Args:
+        views: (index, obj_points, img_points) per view.
+        size: (W, H) of the images.
+        guess: (K, dist) initial intrinsics, or None.
+        flags: cv2.CALIB_* flags.
     """
     obj = [o.reshape(-1, 1, 3) for _, o, _ in views]
     img = [p.reshape(-1, 1, 2) for _, _, p in views]
@@ -647,8 +737,11 @@ def _calibrate(views: list[tuple[int, np.ndarray, np.ndarray]], size: tuple[int,
 
 
 def _usable_guess(solution: Solution, size: tuple[int, int]) -> bool:
-    """
-    Check calibrateCamera would accept the solution as an intrinsic guess for this image size.
+    """Check calibrateCamera would accept the solution as an intrinsic guess for this image size.
+
+    Args:
+        solution: Previous solution.
+        size: (W, H) of the images to solve over.
     """
     K = solution.K
     return bool(solution.image_size == size
@@ -666,10 +759,13 @@ def _converged(K: np.ndarray, std: dict[str, float], settings: CalibrationSettin
 
 def _coverage_grid(views: list[tuple[np.ndarray, tuple[int, int]]],
                    grid: tuple[int, int]) -> np.ndarray:
-    """
-    Count corners per cell of a (rows, cols) grid spanning each view's frame uniformly.
+    """Count corners per cell of a (rows, cols) grid spanning each view's frame uniformly.
 
     Pixel-centre convention: the frame covers [-0.5, W - 0.5] x [-0.5, H - 0.5].
+
+    Args:
+        views: (corners, (W, H)) per view, corners (N, 2) in that frame's pixels.
+        grid: (rows, cols) of the grid.
     """
     rows, cols = grid
     counts = np.zeros((rows, cols), dtype=int)
@@ -720,7 +816,13 @@ def _dump_yaml(doc: Any) -> str:
 
 
 def _atomic_write(path: Path, data: bytes, mode_from: Path | None = None) -> None:
-    """Replace path with data atomically: write a temporary file next to it, fsync, then rename."""
+    """Replace path with data atomically: write a temporary file next to it, fsync, then rename.
+
+    Args:
+        path: File to replace.
+        data: New contents.
+        mode_from: File whose permission bits the new file takes; None uses path, if it exists.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
     try:

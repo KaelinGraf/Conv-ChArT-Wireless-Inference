@@ -93,13 +93,22 @@ RELEASE_DETECTOR = Path("checkpoints") / "detector_882k.onnx"
 
 
 def stamp_of(name: str) -> float:
-    """The stamp of a frame saved as <sec>_<nanosec>.<ext>."""
+    """Return the stamp, in seconds, of a frame saved as <sec>_<nanosec>.<ext>.
+
+    Args:
+        name: File name of the saved frame.
+    """
     sec, nsec = Path(name).stem.split("_")
     return int(sec) + int(nsec) * 1e-9
 
 
 def stored_frames(stream_dir: Path, upto: float = float("inf")) -> list:
-    """The names of the frames saved in stream_dir stamped at or before upto, oldest first."""
+    """Return the names of the frames saved in stream_dir stamped at or before upto, oldest first.
+
+    Args:
+        stream_dir: Folder of saved frames, or None.
+        upto: Latest stamp to include, in seconds.
+    """
     if stream_dir is None or not stream_dir.is_dir():
         return []
     with os.scandir(stream_dir) as it:
@@ -108,9 +117,16 @@ def stored_frames(stream_dir: Path, upto: float = float("inf")) -> list:
 
 
 class Generation:
-    """
-    One bank generation: the teacher that labels it, the harvesters of its live frames (stamped after cut) and of the
-    stored ones (at or before cut), and the progress of the pass over the stored frames.
+    """One bank generation: its teacher, its harvesters and the progress of its relabel pass.
+
+    Live frames are stamped after cut and stored ones at or before it.
+
+    Args:
+        g: Generation number.
+        teacher_onnx: Path of the teacher ONNX model that labels the generation.
+        cut: Stamp dividing stored frames from live ones, in seconds.
+        live: Harvester of the live frames.
+        relabeler: Harvester of the stored frames, or None when they are not relabelled.
     """
 
     def __init__(self, g: int, teacher_onnx: str, cut: float, live, relabeler):
@@ -243,7 +259,10 @@ class SSLNode(Node):
 
     @property
     def harvester(self):
-        """The current generation's live harvester (its lens, lattice and template serve the evaluations)."""
+        """Return the current generation's live harvester.
+
+        Its lens, lattice and template serve the evaluations.
+        """
         return self.gen.live
 
     def _model_path(self, key: str) -> str:
@@ -278,9 +297,14 @@ class SSLNode(Node):
                                bank=f"gen{g}", prefix=prefix)
 
     def _start_generation(self, g: int, teacher_onnx: str, cut: float) -> None:
-        """
-        Start bank generation g, labelled by teacher_onnx: live frames stamped after cut into its L chunks and, with
-        relabel, every stored frame stamped at or before cut into its R chunks, by a background pass.
+        """Start bank generation g, labelled by teacher_onnx.
+
+        Live frames after cut go to L chunks; with relabel, stored frames go to R chunks.
+
+        Args:
+            g: Generation number.
+            teacher_onnx: Path of the teacher ONNX model.
+            cut: Stamp dividing stored frames from live ones, in seconds.
         """
         relabel = self.p["relabel"] and bool(stored_frames(self.stream_dir, cut))
         gen = Generation(g, teacher_onnx, cut, self._harvester_for(g, "L"),
@@ -303,7 +327,12 @@ class SSLNode(Node):
                                + (", stored frames up to it relabelled in the background" if relabel else ""))
 
     def _teach(self, gen: Generation, img: np.ndarray):
-        """The generation's teacher on img, waiting while it is paused for a round; None once the pass must stop."""
+        """Run the generation's teacher on img (waiting while paused); None once the pass stops.
+
+        Args:
+            gen: Generation whose teacher labels the frame.
+            img: Frame to label.
+        """
         while not (self._stop.is_set() or gen.cancel.is_set()):
             with self._teacher_lock:
                 if self.teacher is not None and self.teacher_onnx == gen.teacher_onnx:
@@ -312,7 +341,11 @@ class SSLNode(Node):
         return None
 
     def _relabel_teacher(self, gen: Generation) -> None:
-        """Run the generation's teacher over the stored frames up to its cut, oldest first, for _relabel_harvest."""
+        """Run the generation's teacher over the stored frames up to its cut, oldest first.
+
+        Args:
+            gen: Generation being relabelled.
+        """
         try:
             deadline = time.time() + 5.0
             while self._to_save and time.time() < deadline and not self._stop.is_set():
@@ -347,7 +380,11 @@ class SSLNode(Node):
             gen.queue.put(None)
 
     def _relabel_harvest(self, gen: Generation) -> None:
-        """Bank what _relabel_teacher labels into the generation's R chunks; when the pass ends, close it."""
+        """Bank what _relabel_teacher labels into the generation's R chunks; close it at the end.
+
+        Args:
+            gen: Generation being relabelled.
+        """
         h = gen.relabeler
         while True:
             item = gen.queue.get()
@@ -374,7 +411,7 @@ class SSLNode(Node):
         self._maybe_round()
 
     def _bank(self) -> dict:
-        """The current generation's bank: its live and relabelled chunks together."""
+        """Return the current generation's bank: its live and relabelled chunks together."""
         with self._gen_lock:
             snaps = [h.snapshot() for h in self.gen.harvesters()]
         totals: Counter = Counter()
@@ -442,7 +479,7 @@ class SSLNode(Node):
                 self._hcv.notify()
 
     def _save_loop(self) -> None:
-        """Write the received frames into stream/; at shutdown, write what is still queued, then return."""
+        """Write received frames into stream/, and what is still queued at shutdown."""
         while True:
             with self._scv:
                 while not self._to_save and not self._stop.is_set():

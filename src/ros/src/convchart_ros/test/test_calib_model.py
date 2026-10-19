@@ -61,7 +61,7 @@ def detector(tmp_path_factory):
 
 @pytest.fixture(scope='module')
 def stills():
-    """Full-resolution renders over diverse poses: [(frame, true corners, true ids)]."""
+    """Return full-resolution renders over diverse poses as [(frame, true corners, true ids)]."""
     poses = diverse_poses(SPEC, K_FULL, FULL, n=16)
     return [render_view(BOARD, SPEC, K_FULL, DIST, rvec, tvec, FULL, seed=i)
             for i, (rvec, tvec) in enumerate(poses)]

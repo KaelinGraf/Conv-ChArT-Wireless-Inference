@@ -22,9 +22,12 @@ needs_ffmpeg = pytest.mark.skipif(not HAVE_FFMPEG, reason="needs ffmpeg and ffpr
 
 
 def drawing(bg):
-    """
-    The kinds of drawing the dashboard does, with its 3-value colours, over a background (3 or 4 values): AA and
-    plain lines, outlined text, a filled dot and a 30 % band.
+    """Return the dashboard's kinds of drawing, in 3-value colours, over a background.
+
+    The drawing has AA and plain lines, outlined text, a filled dot and a 30 % band.
+
+    Args:
+        bg: Background colour, with 3 or 4 values.
     """
     img = np.empty((120, 200, len(bg)), np.uint8)
     img[:] = bg

@@ -45,7 +45,7 @@ def ros():
 
 @pytest.fixture
 def clip(tmp_path):
-    """Twelve 640x480 frames, frame i a flat grey of 10 * (i + 1)."""
+    """Return a folder of twelve 640x480 frames, frame i a flat grey of 10 * (i + 1)."""
     folder = tmp_path / "clip"
     folder.mkdir()
     for i in range(12):

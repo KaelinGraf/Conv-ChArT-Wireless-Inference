@@ -37,7 +37,12 @@ def poses():
 
 
 def detect(board, frame):
-    """Detect ChArUco corners; return their ids and pixel-centre coordinates."""
+    """Detect ChArUco corners; return their ids and pixel-centre coordinates.
+
+    Args:
+        board: cv2 ChArUco board to detect.
+        frame: Mono frame.
+    """
     corners, ids, _, _ = cv2.aruco.CharucoDetector(board).detectBoard(frame)
     if ids is None:
         return np.empty(0, dtype=int), np.empty((0, 2))
@@ -45,7 +50,14 @@ def detect(board, frame):
 
 
 def detection_errors(spec, pose, dist=DIST, seed=0):
-    """Render a pose, detect it; return (ids found, distance of each to its ground truth in px)."""
+    """Render a pose, detect it; return (ids found, distance of each to its ground truth in px).
+
+    Args:
+        spec: Board to render.
+        pose: (rvec, tvec) of the board.
+        dist: Distortion coefficients.
+        seed: Noise seed.
+    """
     board = make_board(spec)
     frame, truth, _ = render_view(board, spec, K, dist, *pose, SIZE, seed=seed)
     ids, found = detect(board, frame)
@@ -57,7 +69,12 @@ def chessboard_corners(spec):
 
 
 def board_outline(spec, per_edge=25):
-    """Sample the board's outer edge (lens distortion bends it), in board coordinates."""
+    """Sample the board's outer edge (lens distortion bends it), in board coordinates.
+
+    Args:
+        spec: Board whose edge is sampled.
+        per_edge: Samples per edge.
+    """
     width, height = np.array(spec.squares) * spec.square_length
     t = np.linspace(0.0, 1.0, per_edge, endpoint=False)
     zero, one = np.zeros_like(t), np.ones_like(t)

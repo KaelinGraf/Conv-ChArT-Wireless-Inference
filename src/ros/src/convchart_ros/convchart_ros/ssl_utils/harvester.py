@@ -181,7 +181,11 @@ class OnlineHarvester:
         return "kept"
 
     def split_of(self, stamp: float) -> str:
-        """The split a frame stamped stamp belongs to when splitting by time blocks."""
+        """Return the split a frame belongs to when splitting by time blocks.
+
+        Args:
+            stamp: Frame stamp, in seconds.
+        """
         block = int(math.floor(stamp / self.p.split_block_s))
         return "heldout" if block % self.p.heldout_every == self.p.heldout_every - 1 else "train"
 

@@ -32,7 +32,13 @@ def jsonl(path):
 
 
 def make_session(tmp_path, frames=None, **opts):
-    """Open a new session over stored frames ({stamp: image}), the models and configs stand-ins."""
+    """Open a new session over stored frames, with stand-ins for the models and configs.
+
+    Args:
+        tmp_path: Folder to build the session in.
+        frames: Stamp mapped to image (None writes an empty file), or None for two empty frames.
+        **opts: Command-line options of the loop, as keyword arguments.
+    """
     stream = tmp_path / 'live' / 'stream'
     stream.mkdir(parents=True)
     for stamp, img in (frames or {1000.0: None, 1000.1: None}).items():
@@ -60,7 +66,16 @@ def make_session(tmp_path, frames=None, **opts):
 
 
 class Scripted(OfflineLoop):
-    """The loop with its GPU stages scripted: frames labelled per pass, accepted per round."""
+    """The offline loop with its GPU stages scripted: frames labelled per pass, accepted per round.
+
+    Args:
+        p: Offline loop parameters.
+        session: Session folder.
+        labelled: Frames labelled by each pass, in pass order.
+        accepted: Whether each round's candidate is accepted, in round order.
+        resumed: Whether the session is being resumed.
+        crash: ('pass', g) to raise in the middle of pass g, or None.
+    """
 
     def __init__(self, p, session, labelled, accepted, resumed=False, crash=None):
         super().__init__(p, session, resumed, log=lambda m: None)
@@ -197,7 +212,14 @@ def key(img):
 
 
 class Teacher:
-    """Stand in for src/inference.py's pipeline on one detector, over a known rendered video."""
+    """Stand-in for src/inference.py's pipeline on one detector, over a known rendered video.
+
+    The first teacher and the release find the board every 5th frame of the first stretch only.
+
+    Args:
+        table: Frame hash mapped to (frame index, homography).
+        detector: Path of the detector ONNX model.
+    """
 
     def __init__(self, table, detector):
         self.table, self.detector = table, detector

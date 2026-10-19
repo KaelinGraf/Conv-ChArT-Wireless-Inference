@@ -33,7 +33,11 @@ LEVELS = ["dark", "dim", "bright"]
 
 
 def _read_jsonl(path: Path) -> list:
-    """The rows of a JSONL log; a line that does not parse (cut short by a crash) is skipped."""
+    """Return the rows of a JSONL log, skipping a line that does not parse (cut short by a crash).
+
+    Args:
+        path: Path of the JSONL file.
+    """
     out = []
     if path.exists():
         for line in path.read_text().splitlines():
@@ -47,9 +51,13 @@ def _read_jsonl(path: Path) -> list:
 class Analytics:
 
     def __init__(self, session_dir, window_s: float = 30.0, replay: bool = False, resume: bool = False):
-        """
-        replay: re-render a finished session from its logs, writing nothing but the figures. resume: carry on a
-        session, keeping its clock (t0) and history and appending to its logs.
+        """Open the analytics of a session folder, creating it if needed.
+
+        Args:
+            session_dir: Session folder that holds the logs and figures.
+            window_s: Window of the rolling stats, in seconds.
+            replay: Re-render a finished session from its logs, writing nothing but the figures.
+            resume: Carry on a session: keep its clock (t0) and history, and append to its logs.
         """
         self.dir = Path(session_dir)
         self.dir.mkdir(parents=True, exist_ok=True)
@@ -103,8 +111,15 @@ class Analytics:
             self._segments_f.write(json.dumps(seg) + "\n")
 
     def relabel(self, seg: dict, gen: int, seq: int) -> None:
-        """A segment of a bank generation's pass over the stored frames: to relabel.jsonl, kept out of the live
-        stream's tallies (those frames were counted when they came)."""
+        """Log a segment of a bank generation's relabel pass to relabel.jsonl.
+
+        Relabelled frames stay out of the live stream's tallies, which counted them on arrival.
+
+        Args:
+            seg: Segment summary from the harvester.
+            gen: Bank generation.
+            seq: Sequence number of the segment within the pass.
+        """
         row = {**seg, "t": round(time.time() - self.t0, 3), "seq": seq, "gen": gen, "kind": "relabel"}
         with self.lock:
             self._relabel_f.write(json.dumps(row) + "\n")
@@ -212,7 +227,15 @@ class Analytics:
 
     @staticmethod
     def _bin(t, v, width):
-        """The mean of v in bins of width over t, from t's first sample (NaN in a bin with no finite v)."""
+        """Return the mean of v in bins of width over t, starting at t's first sample.
+
+        A bin with no finite v holds NaN.
+
+        Args:
+            t: Sample times, in seconds.
+            v: Sample values.
+            width: Bin width, in seconds.
+        """
         if len(t) == 0:
             return np.array([]), np.array([])
         lo = float(np.min(t))

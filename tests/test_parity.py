@@ -33,10 +33,7 @@ def pipe():
 
 @pytest.fixture(scope="module")
 def frame():
-    """A rendered 5x5 ChArUco board projected into a native-resolution frame under a KNOWN rigid
-    pose: H = K [r1 r2 t] S, with S mapping board pixels to the unitless lattice
-    (square_length_m is null in cfg, so tvec comes back in units of squares).
-    """
+    """Return a rendered 5x5 ChArUco board in a native-resolution frame under a known pose."""
     rng = np.random.default_rng(0)
     res = 480
     img, corners = render_board(res)
@@ -56,7 +53,12 @@ def frame():
 
 
 class _Shim(torch.nn.Module):
-    """Wraps an onnx_session so dcc.pipeline.detect() can call it like the torch model."""
+    """Wrapper of an ONNX session that dcc.pipeline.detect() can call like the torch model.
+
+    Args:
+        session: Callable ONNX session.
+        pad_batch: Fixed batch size to pad inputs to, or None to pass them unpadded.
+    """
 
     def __init__(self, session, pad_batch=None):
         super().__init__()

@@ -21,7 +21,10 @@ CELLS_PER_SQUARE = 20
 
 
 def board_cells() -> np.ndarray:
-    """The board as a (100, 100) uint8 grid, 0 black and 255 white, one entry per 1/20 square."""
+    """Return the board as a (100, 100) uint8 grid, 0 black and 255 white.
+
+    The grid has one entry per 1/20 of a square.
+    """
     board = cv2.aruco.CharucoBoard((5, 5), 1.0, 0.7, cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_5X5_50))
     px = 5
     img = board.generateImage((5 * CELLS_PER_SQUARE * px,) * 2, marginSize=0, borderBits=1)

@@ -40,8 +40,15 @@ _ROLL_DEG = 20.0
 
 def diverse_poses(spec: BoardSpec, K: ArrayLike, size: tuple[int, int],
                   n: int = 24) -> list[tuple[np.ndarray, np.ndarray]]:
-    """Deterministic board poses that make a well-conditioned calibration, as [(rvec, tvec)]
-    (float64, (3,)).
+    """Return deterministic board poses for a well-conditioned calibration, as [(rvec, tvec)].
+
+    Poses cover a 3x3 grid, near and far, tilted 15-40 degrees, rolled up to 20, in a 5% margin.
+
+    Args:
+        spec: Board to place; tvec comes out in spec.square_length units.
+        K: (3, 3) camera matrix.
+        size: (W, H) of the frame in pixels.
+        n: Number of poses.
     """
     K = np.asarray(K, dtype=np.float64).reshape(3, 3)
     extent = np.array(spec.squares, dtype=np.float64) * spec.square_length
@@ -66,11 +73,23 @@ def render_view(board: cv2.aruco.CharucoBoard, spec: BoardSpec, K: ArrayLike, di
                 rvec: ArrayLike, tvec: ArrayLike, size: tuple[int, int], px_per_square: int = 80,
                 background: int = _BACKGROUND, noise_std: float = _NOISE_STD, blur_sigma: float = 0.7,
                 seed: int = 0) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Render the board under one pose, as (frame uint8 (H, W), corners (n_inner, 2) float64, ids
-    (n_inner,)). corners are the chessboard corners projected by cv2.projectPoints with dist
-    (pixel-centre convention); ids are 0..n_inner-1, the ChArUco corner ids, so
-    corners[found_ids] is the ground truth of a detection. @args: board: the cv2 board of spec
-    (make_board(spec)). spec: board geometry.
+    """Render the board under one pose, as (frame, corners, ids) with ground-truth corners.
+
+    corners are the projected chessboard corners (pixel-centre convention) indexed by ChArUco id.
+
+    Args:
+        board: cv2 board of spec (make_board(spec)).
+        spec: Board geometry.
+        K: (3, 3) camera matrix.
+        dist: Distortion coefficients in OpenCV order; all zero skips the distortion step.
+        rvec: Board-to-camera rotation vector.
+        tvec: Board-to-camera translation, in spec.square_length units.
+        size: (W, H) of the frame in pixels.
+        px_per_square: Resolution of the board image that is warped into the frame.
+        background: Grey level around the board.
+        noise_std: Standard deviation of the additive Gaussian noise, in grey levels.
+        blur_sigma: Gaussian blur (optics) in pixels, applied before the noise.
+        seed: Noise seed; the same seed gives the same frame.
     """
     K = np.asarray(K, dtype=np.float64).reshape(3, 3)
     dist = np.asarray(dist, dtype=np.float64).ravel()
@@ -107,8 +126,11 @@ def render_view(board: cv2.aruco.CharucoBoard, spec: BoardSpec, K: ArrayLike, di
 
 
 def blank_frame(size: tuple[int, int], seed: int = 0) -> np.ndarray:
-    """A frame without a board: render_view's background and noise only, uint8 (H, W). @args: size:
-    (W, H) of the frame. seed: noise seed; the same seed gives the same frame.
+    """Return a uint8 (H, W) frame without a board: render_view's background and noise only.
+
+    Args:
+        size: (W, H) of the frame in pixels.
+        seed: Noise seed; the same seed gives the same frame.
     """
     width, height = int(size[0]), int(size[1])
     noise = np.random.default_rng(seed).standard_normal((height, width), dtype=np.float32)
@@ -116,16 +138,21 @@ def blank_frame(size: tuple[int, int], seed: int = 0) -> np.ndarray:
 
 
 def _pixel_to_board(scale: float) -> np.ndarray:
-    """
-    S: board-image pixel (u, v) -> board coordinates ((u + 0.5) * scale, (v + 0.5) * scale), pixel-centre
-    convention, same origin and axes as board.getChessboardCorners().
+    """Return S, the homography from board-image pixels to board coordinates.
+
+    Pixel (u, v) maps to ((u + 0.5) * scale, (v + 0.5) * scale), as in getChessboardCorners().
+
+    Args:
+        scale: Board units per board-image pixel.
     """
     return np.array([[scale, 0.0, 0.5 * scale], [0.0, scale, 0.5 * scale], [0.0, 0.0, 1.0]])
 
 
 def _to_samples(s: int) -> np.ndarray:
-    """
-    Frame pixel coordinates -> sample-grid coordinates (s x s samples per pixel, pixel-centre convention).
+    """Return the transform from frame pixel coordinates to sample-grid coordinates.
+
+    Args:
+        s: Samples per pixel along each axis (pixel-centre convention).
     """
     offset = (s - 1) / 2.0
     return np.array([[s, 0.0, offset], [0.0, s, offset], [0.0, 0.0, 1.0]])
@@ -133,8 +160,13 @@ def _to_samples(s: int) -> np.ndarray:
 
 def _warp(board_img: np.ndarray, homography: np.ndarray, size: tuple[int, int],
           background: float) -> np.ndarray:
-    """
-    Warp the board image onto a float32 canvas of background, leaving the canvas outside the board as is.
+    """Warp the board image onto a float32 canvas of background, leaving the rest of it as is.
+
+    Args:
+        board_img: float32 board image.
+        homography: (3, 3) map from board-image pixels to canvas pixels.
+        size: (W, H) of the canvas in pixels.
+        background: Grey level of the canvas.
     """
     canvas = np.full((size[1], size[0]), float(background), dtype=np.float32)
     cv2.warpPerspective(board_img, homography, size, dst=canvas, flags=cv2.INTER_LINEAR,
@@ -145,8 +177,14 @@ def _warp(board_img: np.ndarray, homography: np.ndarray, size: tuple[int, int],
 @lru_cache(maxsize=2)
 def _undistort_maps(k_key: tuple[float, ...], dist_key: tuple[float, ...],
                     size: tuple[int, int]) -> tuple[np.ndarray, np.ndarray, np.ndarray, tuple[int, int]]:
-    """For every sample of the supersampled frame, its undistorted (ideal pinhole) location, cached
-    per camera.
+    """Return the undistorted (ideal pinhole) location of every sample of the supersampled frame.
+
+    Returns remap maps into an ideal canvas, the transform to that canvas and its (W, H); cached.
+
+    Args:
+        k_key: Camera matrix K flattened to a tuple.
+        dist_key: Distortion coefficients as a tuple.
+        size: (W, H) of the frame in pixels.
     """
     width, height = size
     s = _SUPERSAMPLE
@@ -178,15 +216,24 @@ def _to_uint8(frame: np.ndarray) -> np.ndarray:
 
 
 def _spread(i: int, step: float, lo: float, hi: float) -> float:
-    """
-    Element i of a low-discrepancy (Weyl) sequence, scaled to [lo, hi).
+    """Return element i of a low-discrepancy (Weyl) sequence, scaled to [lo, hi).
+
+    Args:
+        i: Element index.
+        step: Fractional increment of the sequence.
+        lo: Lower bound of the output range.
+        hi: Upper bound of the output range (exclusive).
     """
     return lo + (hi - lo) * ((0.5 + i * step) % 1.0)
 
 
 def _tilt(tilt_x_deg: float, tilt_y_deg: float, roll_deg: float) -> np.ndarray:
-    """
-    Rz(roll) Rx(tilt_x) Ry(tilt_y): the board's orientation relative to facing the camera.
+    """Return Rz(roll) Rx(tilt_x) Ry(tilt_y): board orientation relative to facing the camera.
+
+    Args:
+        tilt_x_deg: Tilt about the board's x axis, in degrees.
+        tilt_y_deg: Tilt about the board's y axis, in degrees.
+        roll_deg: In-plane roll, in degrees.
     """
     a, b, c = np.radians([tilt_x_deg, tilt_y_deg, roll_deg])
     rot_x = np.array([[1.0, 0.0, 0.0], [0.0, np.cos(a), -np.sin(a)], [0.0, np.sin(a), np.cos(a)]])
@@ -196,8 +243,10 @@ def _tilt(tilt_x_deg: float, tilt_y_deg: float, roll_deg: float) -> np.ndarray:
 
 
 def _facing(direction: np.ndarray) -> np.ndarray:
-    """
-    Rotation turning the optical axis (0, 0, 1) onto direction by the shortest arc.
+    """Return the rotation turning the optical axis (0, 0, 1) onto direction by the shortest arc.
+
+    Args:
+        direction: (3,) target direction in the camera frame.
     """
     unit = direction / np.linalg.norm(direction)
     axis = np.cross([0.0, 0.0, 1.0], unit)
@@ -208,8 +257,11 @@ def _facing(direction: np.ndarray) -> np.ndarray:
 
 
 def _bbox(points: np.ndarray, K: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    """
-    Pixel bounding box (lo, hi) of camera-frame points under the pinhole model.
+    """Return the pixel bounding box (lo, hi) of camera-frame points under the pinhole model.
+
+    Args:
+        points: (N, 3) points in the camera frame.
+        K: (3, 3) camera matrix.
     """
     projected = points @ K.T
     uv = projected[:, :2] / projected[:, 2:]
@@ -218,11 +270,17 @@ def _bbox(points: np.ndarray, K: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
 
 def _place(tilt: np.ndarray, outline: np.ndarray, K: np.ndarray, size: tuple[int, int], anchor: np.ndarray,
            fill: float) -> tuple[np.ndarray, np.ndarray]:
-    """Orientation and camera-frame centre of a board tilted by tilt relative to facing the camera,
-    such that its projected bounding box has its larger side, relative to the frame, equal to
-    fill and sits at anchor between the margins (per axis: 0 = flush with the low margin, 0.5 =
-    centred, 1 = flush with the high one). @args: tilt: board orientation relative to facing the
-    camera (_tilt). outline: (4, 3) board corners about the board centre, in board axes.
+    """Return the orientation and camera-frame centre that place a tilted board in the frame.
+
+    The projected bounding box fills fill of the frame and sits at anchor between the margins.
+
+    Args:
+        tilt: Board orientation relative to facing the camera (_tilt).
+        outline: (4, 3) board corners about the board centre, in board axes.
+        K: (3, 3) camera matrix.
+        size: (W, H) of the frame in pixels.
+        anchor: (2,) position between the margins per axis: 0 low, 0.5 centred, 1 high.
+        fill: Larger side of the bounding box as a fraction of the frame.
     """
     frame = np.array(size, dtype=np.float64)
     margin = _MARGIN * frame.min()

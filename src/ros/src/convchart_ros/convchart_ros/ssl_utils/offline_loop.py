@@ -71,7 +71,7 @@ OPTIONS = RESUMABLE + ('passes', 'min_steps', 'workers', 'val_size', 'relabel_wo
 
 
 def find_repo() -> Path:
-    """Return the wireless-inference checkout this file belongs to (else the working folder)."""
+    """Return the wireless-inference checkout this file belongs to, else the working folder."""
     for d in Path(__file__).resolve().parents:
         if (d / 'cfg' / 'cfg.yaml').is_file() and (d / 'checkpoints').is_dir():
             return d
@@ -79,12 +79,26 @@ def find_repo() -> Path:
 
 
 def growth_needed(prev: int, min_growth: float) -> int:
-    """Return how many more frames than prev a pass must label for the loop to carry on."""
+    """Return how many more frames than prev a pass must label for the loop to carry on.
+
+    Args:
+        prev: Frames labelled by the previous pass.
+        min_growth: Minimum relative growth, as a fraction of prev.
+    """
     return max(1, math.ceil(min_growth * prev - 1e-9))
 
 
 def next_step(passes: list, rounds: list, max_rounds: int, min_growth: float) -> tuple:
-    """Decide what the loop does next from the loop.jsonl lines of its passes and rounds."""
+    """Decide the loop's next step from the loop.jsonl lines of its passes and rounds.
+
+    Gives ('pass', g), ('round', g) on pass g's bank or ('exit', reason); failed rounds run again.
+
+    Args:
+        passes: loop.jsonl lines of the passes so far, oldest first.
+        rounds: loop.jsonl lines of the rounds so far, oldest first.
+        max_rounds: Most training rounds the loop runs.
+        min_growth: Minimum relative growth in labelled frames from one pass to the next.
+    """
     if not passes:
         return ('pass', 1)
     last = passes[-1]
@@ -108,7 +122,11 @@ def next_step(passes: list, rounds: list, max_rounds: int, min_growth: float) ->
 
 
 def first_teacher(stream: str) -> str:
-    """Return the last accepted model of the live session that recorded a stream folder."""
+    """Return the last accepted model of the live session that recorded a stream folder.
+
+    Args:
+        stream: Path of a stream folder inside a live session folder.
+    """
     session = Path(stream).parent
     best = resume_state(session)['best_onnx'] if (session / 'session.json').is_file() else None
     if best:
@@ -128,7 +146,17 @@ def _group(ev: dict | None, group: str, key: str):
 
 
 class Headless:
-    """Stand in for an SSLNode where its relabel pass, pipelines and evaluation need one."""
+    """Stand-in for an SSLNode that runs its relabel pass, pipelines and evaluation without ROS.
+
+    Args:
+        p: Offline loop parameters.
+        repo: Root of the wireless-inference checkout.
+        session: Offline session folder.
+        base_cfg: Pipeline config snapshot named in session.json.
+        model_cfg: Detector model config.
+        analytics: Analytics writer of the session.
+        log: Callable that logs one message string.
+    """
 
     _model_path = SSLNode._model_path
     _pipeline_for = SSLNode._pipeline_for
@@ -165,7 +193,14 @@ class Headless:
 
 
 class OfflineLoop:
-    """The loop over one session folder; relabel_pass and train_round do the GPU work."""
+    """The loop over one session folder; relabel_pass and train_round do the GPU work.
+
+    Args:
+        p: Offline loop parameters.
+        session: Offline session folder.
+        resumed: Whether the session is being resumed.
+        log: Callable that logs one message string; None prints with a timestamp.
+    """
 
     def __init__(self, p: dict, session: Path, resumed: bool = False, log=None):
         self.p, self.session, self.resumed = p, Path(session), resumed
@@ -197,7 +232,11 @@ class OfflineLoop:
         return self._node
 
     def piece_node(self, k: int) -> Headless:
-        """Return the node that relabels piece k of a stream (piece 0: the main one)."""
+        """Return the node that relabels piece k of a stream (piece 0 is the main one).
+
+        Args:
+            k: Index of the piece.
+        """
         while len(self.extra) < k:
             self.extra.append(Headless(self.p, self.repo, self.session, self.base_cfg,
                                        self.model_cfg, self.analytics, self.log))
@@ -242,7 +281,11 @@ class OfflineLoop:
         return None
 
     def stop(self, *_) -> None:
-        """End the loop soon: cancel the relabel pass, terminate a running round."""
+        """End the loop soon: cancel the relabel pass and terminate a running round.
+
+        Args:
+            *_: Ignored, so the method can serve as a signal handler.
+        """
         self.stopping = True
         for node in [self._node, *self.extra]:
             if node is not None:
@@ -253,7 +296,12 @@ class OfflineLoop:
             self.rr.stop()
 
     def relabel_pass(self, g: int, teacher: str) -> dict | None:
-        """Relabel every stored frame with teacher into harvest/gen<g>/ (None if stopped)."""
+        """Relabel every stored frame with teacher into harvest/gen<g>/ (None if stopped).
+
+        Args:
+            g: Pass number.
+            teacher: Path of the teacher ONNX model.
+        """
         t0 = time.time()
         self.log(f'pass {g}: relabelling with {teacher}')
         pipe, lock = self.node._pipeline_for(teacher), threading.Lock()
@@ -311,7 +359,12 @@ class OfflineLoop:
                 'fps': round(done / secs, 2) if secs > 0 else None}
 
     def _pieces(self, i: int, d: Path) -> list:
-        """Return stream i as relabel_workers folders of links to contiguous runs of its frames."""
+        """Return stream i as relabel_workers folders of links to contiguous runs of its frames.
+
+        Args:
+            i: Index of the stream.
+            d: Stream folder.
+        """
         names = stored_frames(d)
         k = int(self.p.get('relabel_workers') or 1)
         if not names or k < 2 or len(names) < 2 * k:
@@ -346,7 +399,12 @@ class OfflineLoop:
                      f'ETA {_hms(eta)}')
 
     def _write_labels(self, g: int, chunks: dict) -> None:
-        """Name each label's frame file: harvest/gen<g>/labels.jsonl."""
+        """Write harvest/gen<g>/labels.jsonl, naming each label's frame file.
+
+        Args:
+            g: Pass number.
+            chunks: Chunk folders of the pass under "train" and "heldout".
+        """
         path_of = {stamp_of(n): str(d / n) for d in self.streams for n in stored_frames(d)}
         bank = self.session / 'harvest' / f'gen{g}'
         bank.mkdir(parents=True, exist_ok=True)
@@ -385,7 +443,11 @@ class OfflineLoop:
             val_size=p['val_size'], val_subset=min(150, p['val_size']))
 
     def train_round(self, ps: dict) -> dict | None:
-        """Train a candidate on pass ps's bank, gate it against ps's teacher (None if stopped)."""
+        """Train and gate a candidate on pass ps's bank against ps's teacher (None if stopped).
+
+        Args:
+            ps: loop.jsonl line of the pass.
+        """
         node = self.node
         rr = RoundRunner(self.round_config(), node._evaluate, log=self.log)
         rr.restore(read_rounds(self.session), ps['teacher'])
@@ -446,7 +508,12 @@ class OfflineLoop:
                      f'{rr.steps} steps, training ETA {_hms(eta)}')
 
     def finish(self, reason: str, detail: str | None = None) -> dict:
-        """Write summary.json and the exit line; return the summary."""
+        """Write summary.json and the exit line, and return the summary.
+
+        Args:
+            reason: Exit reason.
+            detail: Further detail on the exit, or None.
+        """
         accepted = [r for r in self.rounds if r.get('accepted')]
         best = accepted[-1]['candidate_onnx'] if accepted else self.p['teacher']
         summary = {
@@ -490,7 +557,12 @@ class OfflineLoop:
 
 
 def open_session(a: argparse.Namespace, repo: Path) -> tuple:
-    """Create or resume the session folder a asks for; return (params, folder, resumed)."""
+    """Create or resume the session folder the arguments ask for; return (params, folder, resumed).
+
+    Args:
+        a: Parsed command-line arguments.
+        repo: Root of the wireless-inference checkout.
+    """
     if a.resume:
         root = repo / 'ssl_output'
         session = (max((d for d in root.glob('offline_*') if (d / 'session.json').exists()),

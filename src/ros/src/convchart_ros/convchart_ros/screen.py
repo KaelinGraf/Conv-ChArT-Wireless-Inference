@@ -5,7 +5,7 @@ import ctypes
 
 
 def screen_size() -> tuple[int, int] | None:
-    """The X screen's size in pixels, or None without a display."""
+    """Return the X screen's size in pixels, or None without a display."""
     try:
         x11 = ctypes.CDLL("libX11.so.6")
     except OSError:
@@ -24,7 +24,13 @@ def screen_size() -> tuple[int, int] | None:
 
 
 def fill_scale(width: int, height: int, screen: tuple[int, int] | None) -> float:
-    """The scale at which a width x height canvas fills the screen, short of the desktop's bars and the title bar."""
+    """Return the scale at which a canvas fills the screen, short of the desktop and title bars.
+
+    Args:
+        width: Canvas width, in pixels.
+        height: Canvas height, in pixels.
+        screen: (width, height) of the screen in pixels, or None without a display.
+    """
     if screen is None:
         return 1.0
     return max(0.5, min((screen[0] - 40) / width, (screen[1] - 130) / height))

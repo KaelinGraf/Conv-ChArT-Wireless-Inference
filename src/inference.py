@@ -431,9 +431,14 @@ class inference_pipeline:
         _, _, self.H_in, self.W_in = self.detector.input_shapes[0]
 
     def run_inference(self, img: U8, K: F64 | None = None, dist: F64 | None = None) -> InferenceResult:
-        """Full pose pipeline on one frame: detector -> peaks -> refiner -> IDs -> undistort ->
-        lattice gate -> recovery -> PnP. @args: img: uint8 image (H, W), (H, W, 1) or BGR (H, W,
-        3); native sensor resolution.
+        """Run the full pose pipeline on one frame, from the detector to PnP.
+
+        Stages: detector, peaks, refiner, IDs, undistortion, lattice gate, recovery and PnP.
+
+        Args:
+            img: uint8 image (H, W), (H, W, 1) or BGR (H, W, 3), at native sensor resolution.
+            K: Camera matrix overriding cfg CAMERA.K, or None; with no K the pose is refused.
+            dist: Distortion coefficients overriding cfg CAMERA.dist, or None.
         """
         K = self.camera.K if K is None else np.asarray(K, dtype=np.float64).reshape(3, 3)
         dist = self.camera.dist if dist is None else np.asarray(dist, dtype=np.float64).ravel()
@@ -524,8 +529,12 @@ class inference_pipeline:
         return img
 
     def _preprocess(self, img: U8, H: int, W: int) -> F32:
-        """Sensor frame -> detector input (1, 1, H, W) float32 in [0, 1]. @args: img: uint8 mono
-        frame.
+        """Convert a sensor frame to the detector input, (1, 1, H, W) float32 in [0, 1].
+
+        Args:
+            img: uint8 mono frame.
+            H: Target height, in pixels.
+            W: Target width, in pixels.
         """
         if img.shape != (H, W):
             img = np.asarray(cv2.resize(img, (W, H), interpolation=cv2.INTER_AREA), dtype=np.uint8)

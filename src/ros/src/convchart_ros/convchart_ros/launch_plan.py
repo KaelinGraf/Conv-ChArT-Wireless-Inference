@@ -127,7 +127,11 @@ def _path(value: str) -> Path:
 
 
 def _relayed(spec: NodeSpec) -> NodeSpec:
-    """The same node, reading image_relay's copy of the frames instead of the Pi's."""
+    """Return the same node, reading image_relay's copy of the frames instead of the Pi's.
+
+    Args:
+        spec: Node to relay.
+    """
     if spec.executable == "telemetry":
         return replace(spec, parameters={**spec.parameters, "image_topic": RELAY_TOPIC})
     return replace(spec, remappings=(("image", RELAY_TOPIC),))

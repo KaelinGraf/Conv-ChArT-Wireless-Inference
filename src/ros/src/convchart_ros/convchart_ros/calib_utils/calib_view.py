@@ -48,18 +48,21 @@ _VERDICT_REJECTED: _Colour = (0, 0, 190)
 
 @dataclass
 class HudState:
-    """What the HUD shows; the node builds one per displayed frame. @args: kept: kept views so far.
-    rejected: rejected captures so far. min_views: kept views needed before the first solve.
-    status: status line, e.g. "collecting 5/12", "solving...", "rms 0.21 px | fx 1402.3 +- 0.9 |
-    ..."; long lines wrap at " | ". coverage_fraction: share of coverage cells holding a kept
-    corner, 0-1; None hides it. converged: the solution meets the convergence thresholds; the
-    status line turns green. verdict: review only, "KEPT" or "REJECTED: <reason>"; None shows
-    "KEPT" or "REJECTED" according to kept. verdict_ok: verdict banner colour, True green and
-    False red; None follows kept. message: transient error shown in red, e.g. "capture timed
-    out"; None shows nothing. help: key help line. distance: live only, the board's distance
-    from the camera for setting the focus: (z, range) in metres, drawn large at the top right
-    under the top band; a str such as "no board" stands in for the numbers; None shows no
-    readout.
+    """Contents of the HUD; the node builds one per displayed frame.
+
+    Args:
+        kept: Kept views so far.
+        rejected: Rejected captures so far.
+        min_views: Kept views needed before the first solve.
+        status: Status line, e.g. "collecting 5/12" or "rms 0.21 px | ..."; wraps at " | ".
+        coverage_fraction: Share of coverage cells holding a kept corner, 0-1; None hides it.
+        converged: The solution meets the convergence thresholds; the status line turns green.
+        verdict: Review only, "KEPT" or "REJECTED: <reason>"; None follows kept.
+        verdict_ok: Verdict banner colour, True green and False red; None follows kept.
+        message: Transient error shown in red, e.g. "capture timed out"; None shows nothing.
+        help: Key help line.
+        distance: Live only, the board's (z, range) in metres, or a str such as "no board"; None
+            shows no readout.
     """
     kept: int
     rejected: int
@@ -76,7 +79,15 @@ class HudState:
 
 def scale_points(points: ArrayLike, src_size: tuple[int, int],
                  dst_size: tuple[int, int]) -> np.ndarray:
-    """Map pixel coordinates from an image of src_size to the same image resized to dst_size."""
+    """Map pixel coordinates from an image of src_size to the same image resized to dst_size.
+
+    Per axis, in the pixel-centre convention: dst = (src + 0.5) * (dst_size / src_size) - 0.5.
+
+    Args:
+        points: (..., 2) x, y coordinates; empty input gives a (0, 2) array.
+        src_size: (W, H) of the image the points belong to.
+        dst_size: (W, H) of the resized image.
+    """
     ratio = np.divide(_size(dst_size, "dst_size"), _size(src_size, "src_size"), dtype=np.float64)
     pts = np.asarray(points, dtype=np.float64)
     if pts.size == 0:
@@ -89,9 +100,14 @@ def scale_points(points: ArrayLike, src_size: tuple[int, int],
 def compose_live(frame: np.ndarray | None, hud: HudState, coverage: np.ndarray | None = None,
                  canvas_size: tuple[int, int] = (640, 480),
                  show_coverage: bool = True) -> np.ndarray:
-    """Live-mode canvas: the latest stream frame under the coverage map, the HUD and the distance.
-    @args: frame: stream frame, mono (H, W) or (H, W, 1), or BGR (H, W, 3), any size; it is
-    resized to the canvas (INTER_AREA).
+    """Return the live-mode canvas: the stream frame under the coverage map, HUD and distance.
+
+    Args:
+        frame: Stream frame, mono or BGR at any size; None gives a black canvas.
+        hud: HUD contents; verdict and verdict_ok are ignored in live mode.
+        coverage: (rows, cols) kept-corner counts over the frame; None draws no map.
+        canvas_size: (W, H) of the returned BGR uint8 canvas.
+        show_coverage: False hides the coverage map (the M toggle).
     """
     canvas = _frame_canvas(frame, _size(canvas_size, "canvas_size"))
     if show_coverage and coverage is not None:
@@ -104,8 +120,16 @@ def compose_live(frame: np.ndarray | None, hud: HudState, coverage: np.ndarray |
 
 def compose_review(frame_full: np.ndarray | None, corners_full: ArrayLike | None, kept: bool,
                    hud: HudState, canvas_size: tuple[int, int] = (640, 480)) -> np.ndarray:
-    """Review-mode canvas: a captured frame scaled into the canvas, its corners and a verdict
-    banner.
+    """Return the review-mode canvas: a captured frame, its corners and a verdict banner.
+
+    Corner markers are drawn last, over the HUD bands and the banner, so edge corners stay visible.
+
+    Args:
+        frame_full: Captured frame, mono or BGR at any size; None gives a black canvas, no corners.
+        corners_full: (N, 2) corners in frame_full's pixels; empty or None draws none.
+        kept: Whether the capture is kept: green corner markers when True, red when False.
+        hud: HUD contents; verdict and verdict_ok set the banner, defaulting to kept.
+        canvas_size: (W, H) of the returned BGR uint8 canvas.
     """
     size = _size(canvas_size, "canvas_size")
     image = None if frame_full is None else np.asarray(frame_full)
@@ -122,7 +146,12 @@ def compose_review(frame_full: np.ndarray | None, corners_full: ArrayLike | None
 
 @dataclass(frozen=True)
 class _Font:
-    """FONT_HERSHEY_SIMPLEX at one scale and thickness, with its line metrics in px."""
+    """FONT_HERSHEY_SIMPLEX at one scale and thickness, with its line metrics in px.
+
+    Args:
+        scale: cv2 font scale.
+        thickness: Stroke thickness in px.
+    """
     scale: float
     thickness: int
 
@@ -136,7 +165,12 @@ class _Font:
 
 
 def _size(size: tuple[int, int], name: str) -> tuple[int, int]:
-    """Validate a (W, H) size and return it as ints."""
+    """Validate a (W, H) size and return it as ints.
+
+    Args:
+        size: (W, H) in pixels.
+        name: Argument name for the error message.
+    """
     w, h = (int(v) for v in size)
     if w <= 0 or h <= 0:
         raise ValueError(f"{name} must be a positive (W, H), got {size}")
@@ -144,13 +178,24 @@ def _size(size: tuple[int, int], name: str) -> tuple[int, int]:
 
 
 def _ui_scale(canvas: np.ndarray) -> float:
-    """Return the layout scale of canvas relative to the reference size (1.0 at 640x480)."""
+    """Return the layout scale of canvas relative to the reference size (1.0 at 640x480).
+
+    Args:
+        canvas: Image whose size sets the scale.
+    """
     h, w = canvas.shape[:2]
     return min(w / _REF_SIZE[0], h / _REF_SIZE[1])
 
 
 def _frame_canvas(frame: np.ndarray | None, size: tuple[int, int]) -> np.ndarray:
-    """Return a new BGR uint8 canvas of size (W, H) holding frame."""
+    """Return a new BGR uint8 canvas of size (W, H) holding frame.
+
+    The frame is stretched with INTER_AREA, mono becomes grey BGR and the input is never written.
+
+    Args:
+        frame: Mono or BGR image, any size and dtype; None or empty gives a black canvas.
+        size: (W, H) of the canvas.
+    """
     w, h = size
     if frame is None or np.size(frame) == 0:
         return np.zeros((h, w, 3), np.uint8)
@@ -170,17 +215,27 @@ def _frame_canvas(frame: np.ndarray | None, size: tuple[int, int]) -> np.ndarray
 
 
 def _cell_edges(n_px: int, n_cells: int) -> np.ndarray:
-    """
-    Return the first pixel of each of n_cells equal cells spanning n_px pixels, then n_px.
+    """Return the first pixel of each of n_cells equal cells spanning n_px pixels, then n_px.
 
     A pixel belongs to the cell holding its centre (pixel-centre convention).
+
+    Args:
+        n_px: Number of pixels along the axis.
+        n_cells: Number of cells along the axis.
     """
     cell_of = np.minimum(((np.arange(n_px) + 0.5) * (n_cells / n_px)).astype(int), n_cells - 1)
     return np.searchsorted(cell_of, np.arange(n_cells + 1))
 
 
 def _draw_coverage(canvas: np.ndarray, coverage: np.ndarray) -> None:
-    """Draw the coverage map onto canvas in place."""
+    """Draw the coverage map onto canvas in place.
+
+    Grid lines between cells, and a green fill whose opacity rises with the count, then saturates.
+
+    Args:
+        canvas: BGR canvas drawn on.
+        coverage: (rows, cols) kept-corner counts over the canvas.
+    """
     counts = np.asarray(coverage)
     if counts.ndim != 2 or 0 in counts.shape:
         raise ValueError(f"coverage must be a (rows, cols) array, got shape {counts.shape}")
@@ -196,7 +251,13 @@ def _draw_coverage(canvas: np.ndarray, coverage: np.ndarray) -> None:
 
 
 def _draw_markers(canvas: np.ndarray, points: np.ndarray, colour: _Colour) -> None:
-    """Draw filled, black-outlined dots centred on points (canvas pixels, sub-pixel accurate)."""
+    """Draw filled, black-outlined dots centred on points (canvas pixels, sub-pixel accurate).
+
+    Args:
+        canvas: BGR canvas drawn on.
+        points: (N, 2) dot centres in canvas pixels.
+        colour: BGR fill colour.
+    """
     h, w = canvas.shape[:2]
     ui = _ui_scale(canvas)
     radius = max(2.0, _MARKER_RADIUS * ui)
@@ -212,7 +273,13 @@ def _draw_markers(canvas: np.ndarray, points: np.ndarray, colour: _Colour) -> No
 
 
 def _draw_hud(canvas: np.ndarray, hud: HudState, banner: tuple[str, bool] | None = None) -> int:
-    """Draw the HUD onto canvas in place; return the row just below the top band."""
+    """Draw the HUD onto canvas in place; return the row just below the top band.
+
+    Args:
+        canvas: BGR canvas drawn on.
+        hud: HUD contents.
+        banner: (verdict, ok) for the review banner; None draws none.
+    """
     h, w = canvas.shape[:2]
     ui = _ui_scale(canvas)
     pad = max(1, round(_PAD * ui))
@@ -244,7 +311,13 @@ def _draw_hud(canvas: np.ndarray, hud: HudState, banner: tuple[str, bool] | None
 
 
 def _draw_distance(canvas: np.ndarray, distance: tuple[float, float] | str, y0: int) -> None:
-    """Draw the distance readout onto canvas in place: a dark box at the top right from row y0."""
+    """Draw the distance readout onto canvas in place: a dark box at the top right from row y0.
+
+    Args:
+        canvas: BGR canvas drawn on.
+        distance: (z, range) in metres, or a str drawn large in amber in their place.
+        y0: Top row of the box.
+    """
     w = canvas.shape[1]
     ui = _ui_scale(canvas)
     pad = max(1, round(_PAD * ui))
@@ -272,7 +345,13 @@ def _draw_distance(canvas: np.ndarray, distance: tuple[float, float] | str, y0: 
 
 
 def _band_height(n_lines: int, font: _Font, pad: int) -> int:
-    """Return the height of a band holding n_lines of font text; 0 for no lines."""
+    """Return the height of a band holding n_lines of font text; 0 for no lines.
+
+    Args:
+        n_lines: Number of text lines.
+        font: Font of the text.
+        pad: Padding above and below the text, in px.
+    """
     if n_lines <= 0:
         return 0
     ascent, descent, gap = font.metrics()
@@ -281,10 +360,19 @@ def _band_height(n_lines: int, font: _Font, pad: int) -> int:
 
 def _text_band(canvas: np.ndarray, y0: int, lines: list[tuple[str, _Colour]], font: _Font,
                pad: int, colour: _Colour, alpha: float, centred: bool = False) -> int:
-    """
-    Shade a full-width band from row y0 and write lines into it, left-aligned or centred.
+    """Shade a full-width band from row y0 and write lines into it, left-aligned or centred.
 
     Returns the row just below the band (y0 when there are no lines).
+
+    Args:
+        canvas: BGR canvas drawn on.
+        y0: Top row of the band.
+        lines: (text, colour) per line.
+        font: Font of the text.
+        pad: Padding around the text, in px.
+        colour: BGR shade of the band.
+        alpha: Opacity of the shade.
+        centred: True centres each line; False aligns it left.
     """
     if not lines:
         return y0
@@ -301,14 +389,29 @@ def _text_band(canvas: np.ndarray, y0: int, lines: list[tuple[str, _Colour]], fo
 
 
 def _blend(region: np.ndarray, colour: _Colour, alpha: float) -> None:
-    """Blend colour over region, a view into the canvas, in place at opacity alpha."""
+    """Blend colour over region, a view into the canvas, in place at opacity alpha.
+
+    Args:
+        region: View into the canvas, changed in place.
+        colour: BGR colour blended in.
+        alpha: Opacity of the colour.
+    """
     if region.size:
         overlay = np.full_like(region, colour)
         region[...] = cv2.addWeighted(region, 1.0 - alpha, overlay, alpha, 0.0)
 
 
 def _wrap(text: str, max_width: int, font: _Font, max_lines: int) -> list[str]:
-    """Wrap text greedily so every line fits max_width px."""
+    """Wrap text greedily so every line fits max_width px.
+
+    Breaks go between " | " groups first, then words; beyond max_lines the text ends in "...".
+
+    Args:
+        text: Text to wrap; newlines start new paragraphs.
+        max_width: Maximum line width in px.
+        font: Font of the text.
+        max_lines: Maximum number of lines returned.
+    """
     lines: list[str] = []
     for paragraph in text.splitlines():
         current = ""

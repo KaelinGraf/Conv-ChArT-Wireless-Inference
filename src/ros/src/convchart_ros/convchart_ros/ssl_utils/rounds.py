@@ -60,7 +60,12 @@ def count_records(dirs) -> int:
 
 
 def set_sampling(finetune_yaml: Path, sampling: str) -> None:
-    """Set real.sampling in a finetune config written by video_bootstrap.py finetune-config."""
+    """Set real.sampling in a finetune config written by video_bootstrap.py finetune-config.
+
+    Args:
+        finetune_yaml: Path of the finetune config.
+        sampling: MixedStream sampling mode, "epoch" (exact passes) or "random".
+    """
     import yaml
     cfg = yaml.safe_load(Path(finetune_yaml).read_text()) or {}
     cfg.setdefault("real", {})["sampling"] = sampling
@@ -68,8 +73,13 @@ def set_sampling(finetune_yaml: Path, sampling: str) -> None:
 
 
 def round_steps(train_frames: int, c: RoundConfig) -> int:
-    """Steps for a round on train_frames banked frames: each frame at least c.passes times, padded
-    to c.real_frac.
+    """Return the steps for a round on train_frames frames, each drawn at least c.passes times.
+
+    A step draws batch x accum samples, real_frac of them real, padded with synthetic ones.
+
+    Args:
+        train_frames: Number of banked train frames.
+        c: Round configuration.
     """
     if train_frames <= 0 or c.real_frac <= 0:
         return max(1, c.min_steps)
@@ -85,9 +95,15 @@ SCALE_GROUPS = (("far <16 px", 0.0, 16.0), ("16-32 px", 16.0, 32.0), ("32-64 px"
 
 
 def evaluate_onnx(pipeline, heldout_dirs, anchor_fn=None, groups=((0.0, 20.0), (20.0, 60.0), (60.0, 256.0))) -> dict:
-    """Score a pipeline (anything with run_inference(image)) against held-out pseudo-labels: an
-    identified corner is a hit when it lands within 2 px of a positive label with the same
-    index.
+    """Score a pipeline against held-out pseudo-labels, overall and per brightness and scale group.
+
+    A hit is an identified corner within 2 px of a positive label with the same index.
+
+    Args:
+        pipeline: Object with run_inference(image).
+        heldout_dirs: Held-out chunk folders, each with images.npy and records.json.
+        anchor_fn: Callable from an inference result to whether it fits an anchor, or None.
+        groups: (low, high) board_level bounds of the dark, dim and bright groups.
     """
     rows = []
     for d in heldout_dirs:
@@ -155,7 +171,12 @@ class RoundRunner:
         self.lock = threading.Lock()
 
     def restore(self, history: list, best_onnx: str | None = None) -> None:
-        """Carry on a resumed session: its finished rounds, round numbering and the model to beat."""
+        """Carry on a resumed session: its finished rounds, round numbering and the model to beat.
+
+        Args:
+            history: Finished rounds, as read from rounds.jsonl.
+            best_onnx: Path of the model to beat, or None to keep the current one.
+        """
         with self.lock:
             self.history = list(history)
             self.round = max((r.get("round", 0) for r in history), default=0)

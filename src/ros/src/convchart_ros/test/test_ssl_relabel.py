@@ -41,7 +41,13 @@ def key(img):
 
 
 class Teacher:
-    """src/inference.py's pipeline for one detector: the true corners of a known frame, anchored every 5th frame."""
+    """Stand-in for src/inference.py's pipeline on one detector, anchored every 5th frame.
+
+    Args:
+        table: Frame hash mapped to (frame index, homography).
+        detector: Path of the detector ONNX model.
+        used: List that records the detector of every inference.
+    """
 
     def __init__(self, table, detector, used):
         self.table, self.detector, self.used = table, detector, used
@@ -55,7 +61,11 @@ class Teacher:
 
 
 class Rounds:
-    """What the node asks of its round runner, after a round whose candidate was accepted."""
+    """Stand-in for the node's round runner, after a round with an accepted candidate.
+
+    Args:
+        best: Path of the accepted candidate ONNX model.
+    """
 
     def __init__(self, best):
         self.best_onnx, self.busy, self.last_failure, self.steps, self.thread = best, False, None, 0, None

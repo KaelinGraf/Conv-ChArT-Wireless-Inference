@@ -137,7 +137,11 @@ class PoseView(Node):
 
 
 def run(node: PoseView) -> None:
-    """The view loop, on the calling (main) thread: OpenCV's window must live there."""
+    """Run the view loop on the calling (main) thread, where OpenCV's window must live.
+
+    Args:
+        node: PoseView node to show.
+    """
     writer, hz, t_prev, t_log = None, 0.0, None, time.monotonic()
     if not node.headless:
         cv2.namedWindow(WINDOW, cv2.WINDOW_AUTOSIZE)
@@ -200,7 +204,11 @@ def _spin(executor: MultiThreadedExecutor, stop: threading.Event) -> None:
 
 
 def main(args=None) -> None:
-    """Run the pose view. A bad parameter ends it with "pose_view: <reason>" and exit status 1."""
+    """Run the pose view; a bad parameter ends it with "pose_view: <reason>" and exit status 1.
+
+    Args:
+        args: Command-line arguments passed to rclpy.init().
+    """
     rclpy.init(args=args)
     try:
         node = PoseView()

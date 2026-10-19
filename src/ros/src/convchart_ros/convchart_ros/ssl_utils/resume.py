@@ -18,7 +18,11 @@ import re
 
 
 def latest_session(output_dir) -> Path | None:
-    """The newest session folder (by name, which is its start time) under output_dir."""
+    """Return the newest session folder (by name, which is its start time) under output_dir.
+
+    Args:
+        output_dir: Folder that holds the session folders.
+    """
     root = Path(output_dir)
     if not root.is_dir():
         return None
@@ -27,7 +31,11 @@ def latest_session(output_dir) -> Path | None:
 
 
 def read_rounds(session) -> list:
-    """The session's finished rounds in round order, one per round number."""
+    """Return the session's finished rounds in round order, one per round number.
+
+    Args:
+        session: Session folder.
+    """
     seen = {}
     path = Path(session) / "rounds.jsonl"
     if path.exists():
@@ -42,7 +50,11 @@ def read_rounds(session) -> list:
 
 
 def generations(session) -> list:
-    """The bank generations on disk, in order."""
+    """Return the bank generations on disk, in order.
+
+    Args:
+        session: Session folder.
+    """
     root = Path(session) / "harvest"
     if not root.is_dir():
         return []
@@ -53,7 +65,13 @@ def generations(session) -> list:
 
 
 def resume_state(session) -> dict:
-    """Everything a node needs to carry on in session."""
+    """Return everything a node needs to carry on in session.
+
+    The dict holds session, meta, history, round, best_onnx, teacher, next_gen and t0.
+
+    Args:
+        session: Session folder.
+    """
     session = Path(session)
     meta = json.loads((session / "session.json").read_text())
     history = read_rounds(session)

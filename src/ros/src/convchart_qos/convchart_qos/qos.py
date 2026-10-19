@@ -60,7 +60,15 @@ INFERENCE_RESULT_QOS = QoSProfile(
 def image_qos_pub(deadline_s: float = 0.15,
                   lease_s: float = 0.5,
                   lifespan_s: float = 0.15) -> QoSProfile:
-    """Build the camera publisher's side of IMAGE_SUB_QOS."""
+    """Build the camera publisher's side of IMAGE_SUB_QOS: best effort, depth 1.
+
+    A deadline_s or lease_s over its ceiling raises ValueError, as the reader would never match.
+
+    Args:
+        deadline_s: Promised publish period, in seconds; at most IMAGE_DEADLINE_CEILING_S.
+        lease_s: Liveliness lease, in seconds.
+        lifespan_s: How long a sample stays worth delivering, in seconds.
+    """
     if deadline_s > IMAGE_DEADLINE_CEILING_S:
         raise ValueError(
             f'offered deadline {deadline_s} s exceeds the {IMAGE_DEADLINE_CEILING_S} s '

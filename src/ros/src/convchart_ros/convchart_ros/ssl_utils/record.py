@@ -42,7 +42,12 @@ def _when(t=None) -> str:
 
 
 def _local(path, root: Path) -> Path:
-    """A path as logged (inside the container, /workspace/...) as it is here."""
+    """Return a path as logged (inside the container, under /workspace) as it is on this machine.
+
+    Args:
+        path: Path as logged.
+        root: Local root of the repo, standing in for /workspace.
+    """
     p = Path(str(path))
     if p.exists() or not str(p).startswith("/workspace/"):
         return p
@@ -66,7 +71,11 @@ def _bucket(rec) -> tuple:
 
 
 def _chunk_stats(chunks) -> dict:
-    """Frames, label sources, labelled corners and coverage of some banked chunks (images.npy + records.json)."""
+    """Return frames, label sources, labelled corners and coverage of some banked chunks.
+
+    Args:
+        chunks: Chunk folders, each with images.npy and records.json.
+    """
     recs = []
     for c in chunks:
         f = Path(c) / "records.json"
@@ -87,7 +96,12 @@ def _bank_dir(session: Path, gen: int) -> Path:
 
 
 def _banked(session: Path, gen: int = 0) -> dict:
-    """A bank generation's frames, per split (generation 0: a session's bank from before generations)."""
+    """Return a bank generation's frame statistics, per split.
+
+    Args:
+        session: Session folder.
+        gen: Bank generation; 0 is a session's bank from before generations.
+    """
     root = _bank_dir(session, gen)
     return {split: _chunk_stats(sorted((root / split).glob("chunk_*"))) for split in ("train", "heldout")}
 
@@ -110,7 +124,14 @@ def _f(x, fmt="{:.4f}"):
 
 
 def _offline_what(meta: dict, p: dict, loop: list, n_bgs: int) -> list:
-    """Return the "What ran" lines of an offline session (ssl_utils.offline_loop)."""
+    """Return the "What ran" lines of an offline session (ssl_utils.offline_loop).
+
+    Args:
+        meta: Contents of session.json.
+        p: Offline loop parameters.
+        loop: Lines of loop.jsonl.
+        n_bgs: Number of background images.
+    """
     out = ["- Offline looped self-supervised fine-tuning of the Conv-ChArT detector over frames "
            "already on disk (`python3 -m convchart_ros.ssl_utils.offline_loop`): each pass "
            "relabels every stored frame with the teacher; a candidate trained from the base on "
@@ -147,7 +168,11 @@ def _short(path) -> str:
 
 
 def _loop_table(loop: list) -> list:
-    """Tabulate each pass and its round: labels, growth, the gate, the ambiguity diagnostic."""
+    """Tabulate each pass and its round: labels, growth, the gate and the ambiguity diagnostic.
+
+    Args:
+        loop: Lines of loop.jsonl.
+    """
     rounds = {}
     for x in loop:
         if x.get("kind") == "round":

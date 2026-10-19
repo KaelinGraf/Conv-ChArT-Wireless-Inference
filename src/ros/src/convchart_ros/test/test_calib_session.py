@@ -75,10 +75,13 @@ CALIBRATION:
 
 
 def render_board(spec, rvec, tvec, visible=None):
-    """
-    Render spec's board under (rvec, tvec) through K_TRUE without distortion, as a mono frame.
+    """Render spec's board under (rvec, tvec) through K_TRUE without distortion, as a mono frame.
 
-    visible = (row0, row1, col0, col1) keeps only those squares; the rest shows the background.
+    Args:
+        spec: Board to render.
+        rvec: Board-to-camera rotation vector.
+        tvec: Board-to-camera translation, in square_length units.
+        visible: (row0, row1, col0, col1) of the squares kept; None keeps all.
     """
     cols, rows = spec.squares
     image = make_board(spec).generateImage((cols * PX_PER_SQUARE, rows * PX_PER_SQUARE),
@@ -99,7 +102,14 @@ def render_board(spec, rvec, tvec, visible=None):
 
 
 def board_poses(n, seed, k=K_TRUE, size=FULL):
-    """Return n board poses over a 3x3 grid of image regions, near and far, tilted 15-40 deg."""
+    """Return n board poses over a 3x3 grid of image regions, near and far, tilted 15-40 deg.
+
+    Args:
+        n: Number of poses.
+        seed: Random seed.
+        k: (3, 3) camera matrix.
+        size: (W, H) of the frame in pixels.
+    """
     rng = np.random.default_rng(seed)
     poses = []
     for _ in range(100 * n):
@@ -121,7 +131,12 @@ def board_poses(n, seed, k=K_TRUE, size=FULL):
 
 
 def kept_view(points, size=FULL):
-    """Wrap image points of the first len(points) inner corners as a kept Detection."""
+    """Wrap image points of the first len(points) inner corners as a kept Detection.
+
+    Args:
+        points: (N, 2) image points of inner corners 0..N-1.
+        size: (W, H) of the frame in pixels.
+    """
     points = np.asarray(points, dtype=np.float64).reshape(-1, 2)
     return Detection(kept=True, reason='', corners=points, ids=np.arange(len(points)),
                      image_size=size, obj_points=CHESS[:len(points)].copy(),
@@ -129,7 +144,15 @@ def kept_view(points, size=FULL):
 
 
 def synthetic_views(n, seed, noise_px=0.05, k=K_TRUE, size=FULL):
-    """Project the inner corners under n diverse poses with k and DIST_TRUE, plus pixel noise."""
+    """Project the inner corners under n diverse poses with k and DIST_TRUE, plus pixel noise.
+
+    Args:
+        n: Number of views.
+        seed: Random seed for the poses and the noise.
+        noise_px: Standard deviation of the pixel noise.
+        k: (3, 3) camera matrix.
+        size: (W, H) of the frame in pixels.
+    """
     rng = np.random.default_rng(seed + 1000)
     views = []
     for rvec, tvec in board_poses(n, seed, k, size):
@@ -140,7 +163,13 @@ def synthetic_views(n, seed, noise_px=0.05, k=K_TRUE, size=FULL):
 
 
 def noisy(view, sigma_px, seed=0):
-    """Return a copy of a kept view with its image points perturbed by sigma_px of noise."""
+    """Return a copy of a kept view with its image points perturbed by sigma_px of noise.
+
+    Args:
+        view: Kept Detection to copy.
+        sigma_px: Standard deviation of the noise in pixels.
+        seed: Random seed.
+    """
     rng = np.random.default_rng(seed)
     return kept_view(view.corners + rng.normal(0.0, sigma_px, view.corners.shape), view.image_size)
 
@@ -161,7 +190,12 @@ def parameters(K, dist):
 
 
 def assert_recovers(solution, k=K_TRUE):
-    """Every parameter within 4 sigma (the solve's own std) of the truth; fx, fy within 0.5%."""
+    """Assert every parameter is within 4 sigma of the truth, and fx, fy within 0.5%.
+
+    Args:
+        solution: Solution to check.
+        k: True camera matrix.
+    """
     estimate = parameters(solution.K, solution.dist)
     truth = parameters(k, DIST_TRUE)
     for name in STD_KEYS:
@@ -173,7 +207,11 @@ def assert_recovers(solution, k=K_TRUE):
 
 
 def record_calibrations(monkeypatch):
-    """Spy on cv2.calibrateCameraExtended, recording the size, initial guess and flags."""
+    """Spy on cv2.calibrateCameraExtended, recording the size, initial guess and flags.
+
+    Args:
+        monkeypatch: pytest monkeypatch fixture.
+    """
     calls = []
     real = cv2.calibrateCameraExtended
 
@@ -466,7 +504,13 @@ def test_carry_over_takes_on_an_earlier_sessions_counts_and_history():
 
 
 def saved_session(folder, names, log=None):
-    """Lay out a session folder: empty files under frames/, and log as calibration_log.yaml."""
+    """Lay out a session folder: empty files under frames/, and log as calibration_log.yaml.
+
+    Args:
+        folder: Session folder to create.
+        names: File names to create under frames/.
+        log: Log document to write, or None for none.
+    """
     (folder / 'frames').mkdir(parents=True)
     for name in names:
         (folder / 'frames' / name).write_bytes(b'')
@@ -585,11 +629,7 @@ def test_outlier_view_is_dropped_and_the_solve_repeated():
 
 
 def test_a_view_over_the_median_rule_but_under_the_floor_is_kept():
-    """
-    A view fitting to about 0.3 px among views at 0.05 px is kept: over 3x the median, under 1 px.
-
-    On the robot (2026-10-14) such views were the board tilted hard at the frame's edge.
-    """
+    """A view at about 0.3 px among views at 0.05 px is kept: over 3x the median, under 1 px."""
     views = synthetic_views(20, seed=8)
     session = CalibrationSession(CalibrationSettings())
     for view in views:
@@ -803,7 +843,7 @@ def test_write_camera_to_cfg_keeps_other_keys_and_backs_up_once(tmp_path):
 
 
 def test_write_camera_to_cfg_keeps_the_comments_of_one_line_entries(tmp_path):
-    """Only the CAMERA lines change when K, dist and image_size are one-line lists, as in cfg.yaml."""
+    """Only the CAMERA lines change when K, dist and image_size are one-line lists."""
     text = ('# top comment\nMODEL:\n  detector: d.onnx   # which one\n\n'
             'CAMERA:\n  K: [[1.0, 0.0, 2.0], [0.0, 1.0, 3.0], [0.0, 0.0, 1.0]]   # old calibration\n'
             '  dist: [0.0, 0.0, 0.0, 0.0, 0.0]\n  image_size: [640, 480]\n\n'

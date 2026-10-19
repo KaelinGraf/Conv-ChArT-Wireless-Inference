@@ -45,14 +45,26 @@ def noise(size, channels=None, seed=0):
 
 
 def excess(canvas, channel):
-    """Return how far one channel exceeds both others, per pixel: 0 on grey, black or white."""
+    """Return how far one channel exceeds both others, per pixel: 0 on grey, black or white.
+
+    Args:
+        canvas: BGR image.
+        channel: Channel index (0 blue, 1 green, 2 red).
+    """
     planes = canvas.astype(int)
     others = np.delete(planes, channel, axis=2).max(axis=2)
     return np.clip(planes[..., channel] - others, 0, None)
 
 
 def centroid(weight, x, y, half=10):
-    """Return the weighted centroid of weight in a (2 * half + 1) px window around (x, y)."""
+    """Return the weighted centroid of weight in a (2 * half + 1) px window around (x, y).
+
+    Args:
+        weight: Per-pixel weights.
+        x: Window centre column.
+        y: Window centre row.
+        half: Half-width of the window in px.
+    """
     x0, y0 = int(round(x)) - half, int(round(y)) - half
     window = weight[y0:y0 + 2 * half + 1, x0:x0 + 2 * half + 1].astype(float)
     ys, xs = np.indices(window.shape)
@@ -60,7 +72,11 @@ def centroid(weight, x, y, half=10):
 
 
 def band_rows(canvas):
-    """Return the row ranges of the top and bottom HUD bands of a canvas over a bright frame."""
+    """Return the row ranges of the top and bottom HUD bands of a canvas over a bright frame.
+
+    Args:
+        canvas: BGR canvas drawn over a bright frame.
+    """
     dark = np.median(canvas, axis=(1, 2)) < 100
     top_end = int(np.argmin(dark))
     bottom_start = len(dark) - int(np.argmin(dark[::-1]))

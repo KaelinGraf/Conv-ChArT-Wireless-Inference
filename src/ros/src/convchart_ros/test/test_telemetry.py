@@ -64,7 +64,7 @@ def ros():
 
 
 def camera_frame():
-    """A 640x480 checkerboard over a gradient, as the Pi's mono8 PNG."""
+    """Return a 640x480 mono8 checkerboard over a gradient, like the Pi's camera image."""
     gray = np.tile(np.linspace(40, 200, 640).astype(np.uint8), (480, 1))
     for i in range(6):
         for j in range(6):
@@ -73,7 +73,11 @@ def camera_frame():
 
 
 class Robot:
-    """What the docking stack publishes, at its rates and with its publishers' QoS, from a background thread."""
+    """Publisher of the docking stack's topics, at their rates and QoS, from a background thread.
+
+    Args:
+        node: rclpy node that owns the publishers.
+    """
 
     def __init__(self, node):
         from dock_msgs.msg import DockEstimate, DockStage, FiducialFix, MpcInfo
@@ -173,7 +177,16 @@ def wait_for(predicate, what, timeout_s=TIMEOUT_S):
 
 
 def snapshot_showing(path, predicate, what, timeout_s=5.0):
-    """The newest snapshot once it shows what is expected: one written just after a change may predate it."""
+    """Return the newest snapshot once it shows what is expected.
+
+    A snapshot written just after a change may predate it, so this polls until timeout_s.
+
+    Args:
+        path: Path of the snapshot PNG.
+        predicate: Callable that takes the BGR snapshot and returns whether it shows the expected.
+        what: Description of the expected content, for the failure message.
+        timeout_s: Longest time to wait, in seconds.
+    """
     deadline = time.monotonic() + timeout_s
     while True:
         img = cv2.imread(str(path)) if path.exists() else None
@@ -203,8 +216,7 @@ def test_a_missing_arm_service_is_reported_not_waited_on(dashboard):
 
 
 def test_replies_of_either_severity_can_follow_each_other(dashboard):
-    """A failed reply after a good one must not raise. rclpy refuses two severities from one logging line,
-    and the exception, raised on the executor thread, once stopped the dashboard receiving anything."""
+    """A failed reply after a good one does not raise on the executor thread."""
     for colour in (telemetry.GOOD, telemetry.CRIT, telemetry.GOOD):
         dashboard._reply("reply", colour)
     assert [c for _, c in dashboard.replies] == [telemetry.CRIT, telemetry.GOOD]
@@ -252,7 +264,15 @@ def test_start_arms_the_drive_then_the_docking_and_stop_disarms_both(dashboard):
 
 
 def decoded(path, index, w, h, pix):
-    """One frame of a capture's video, as rgba or bgr24."""
+    """Return one frame of a capture's video, as rgba or bgr24.
+
+    Args:
+        path: Video file.
+        index: Index of the frame.
+        w: Frame width, in pixels.
+        h: Frame height, in pixels.
+        pix: ffmpeg pixel format, "rgba" or "bgr24".
+    """
     raw = subprocess.run(["ffmpeg", "-v", "error", "-i", str(path), "-vf", f"select=eq(n\\,{index})", "-vsync", "0",
                           "-frames:v", "1", "-f", "rawvideo", "-pix_fmt", pix, "-"], capture_output=True,
                          check=True).stdout
@@ -262,8 +282,7 @@ def decoded(path, index, w, h, pix):
 @needs_dock
 @pytest.mark.skipif(shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None, reason="needs ffmpeg")
 def test_start_docking_records_the_window_and_each_panel_until_stop(dashboard, tmp_path):
-    """START DOCKING records the whole window, the camera, and the EKF/MPC and top-down panels without their
-    background, all frame for frame alike; a second START carries on; STOP ends it and the files are finished."""
+    """START DOCKING records the window and each panel, frame for frame alike, until STOP."""
     probe = rclpy.create_node("capture_probe")
     try:
         with Robot(probe):
@@ -369,7 +388,7 @@ def test_the_dashboard_tracks_every_stream_and_flags_the_ones_that_stop(dashboar
 
 
 def test_each_frame_is_drawn_as_it_comes_and_one_older_than_the_frame_on_show_is_dropped(ros, tmp_path):
-    """The picture only moves forward: a late older frame is dropped; a clock that restarted is followed."""
+    """A late frame older than the one on show is dropped; a clock that restarted is followed."""
     node = telemetry.Telemetry(headless=True, snapshot=str(tmp_path / "dash.png"), capture=False)
     pub = rclpy.create_node("order_probe")
     executor = SingleThreadedExecutor()

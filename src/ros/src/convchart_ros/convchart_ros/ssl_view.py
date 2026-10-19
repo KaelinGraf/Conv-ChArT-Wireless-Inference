@@ -45,7 +45,11 @@ def put(img, s, x, y, colour=INK, scale=0.7, thick=1):
 
 
 def newest(stream: Path) -> str | None:
-    """The newest frame's name: frames are named by stamp, so the largest name is the newest."""
+    """Return the newest frame's name, which is the largest, as frames are named by stamp.
+
+    Args:
+        stream: Folder of saved frames.
+    """
     best = None
     with os.scandir(stream) as it:
         for e in it:

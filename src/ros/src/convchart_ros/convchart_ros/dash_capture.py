@@ -40,8 +40,12 @@ CLEAR = (0, 0, 0, 255)
 
 
 def unmix(drawn: np.ndarray) -> np.ndarray:
-    """The BGRA picture (straight alpha) of a drawing made with 3-value colours on a canvas that
-    started as CLEAR.
+    """Return the straight-alpha BGRA image of a drawing made with BGR colours on a CLEAR canvas.
+
+    OpenCV leaves colours premultiplied and the 4th channel at 255 (1 - alpha).
+
+    Args:
+        drawn: (H, W, 4) uint8 canvas after drawing.
     """
     alpha = 255 - drawn[..., 3]
     colour = cv2.divide(np.ascontiguousarray(drawn[..., :3]), cv2.merge([alpha, alpha, alpha]), scale=255.0)
@@ -49,7 +53,12 @@ def unmix(drawn: np.ndarray) -> np.ndarray:
 
 
 def encoder(kind: str, fps: float) -> tuple[str, str, list]:
-    """(file suffix, ffmpeg input pixel format, ffmpeg output options) for an output of this kind."""
+    """Return (file suffix, ffmpeg input pixel format, ffmpeg output options) for an output kind.
+
+    Args:
+        kind: "bgr" (H.264 mp4) or "bgra" (ProRes 4444 mov with alpha).
+        fps: Frame rate of the output, in frames per second.
+    """
     if kind == "bgr":
         return ".mp4", "bgr24", ["-c:v", "libx264", "-preset", "veryfast", "-crf", "16", "-g", str(round(fps)),
                                  "-pix_fmt", "yuv420p"]
@@ -60,17 +69,40 @@ def encoder(kind: str, fps: float) -> tuple[str, str, list]:
 
 
 def frames_due(t: float, t0: float, fps: float) -> int:
-    """How many frames show times before t: frame i shows t0 + i / fps."""
+    """Return how many frame times fall before t, where frame i shows at t0 + i / fps.
+
+    Args:
+        t: Time, in seconds.
+        t0: Time of the first frame, in seconds.
+        fps: Frame rate, in frames per second.
+    """
     return max(0, math.ceil((t - t0) * fps - 1e-6))
 
 
 def frames_total(t_end: float, t0: float, fps: float) -> int:
-    """The frames of a capture that ended at t_end: at least one."""
+    """Return the number of frames, at least one, of a capture that ended at t_end.
+
+    Args:
+        t_end: End time of the capture, in seconds.
+        t0: Start time of the capture, in seconds.
+        fps: Frame rate, in frames per second.
+    """
     return max(1, round((t_end - t0) * fps))
 
 
 class Recorder:
-    """One output: a thread that holds each picture until the next and writes it at the frame times."""
+    """One output: a thread that holds each picture until the next and writes it at frame times.
+
+    Args:
+        path: Output video file.
+        width: Picture width, in pixels.
+        height: Picture height, in pixels.
+        kind: "bgr" or "bgra".
+        fps: Frame rate, in frames per second.
+        t0: Monotonic start time of the capture, in seconds.
+        ffmpeg: ffmpeg executable.
+        sink: Callable that takes each frame instead of ffmpeg, or None.
+    """
 
     def __init__(self, path: Path, width: int, height: int, kind: str, fps: float, t0: float,
                  ffmpeg: str = "ffmpeg", sink=None):
@@ -168,7 +200,17 @@ class Recorder:
 
 
 class Capture:
-    """The outputs of one capture, in one folder, with its record (capture.json)."""
+    """The outputs of one capture, in one folder, with its record (capture.json).
+
+    Args:
+        folder: Capture folder; it must not exist yet.
+        outputs: Output name mapped to (width, height, kind).
+        fps: Frame rate of every output, in frames per second.
+        t0: Monotonic start time, in seconds.
+        info: Extra fields for capture.json, or None.
+        ffmpeg: ffmpeg executable.
+        sinks: Output name mapped to a callable that takes its frames instead of ffmpeg, or None.
+    """
 
     def __init__(self, folder: Path, outputs: dict, fps: float, t0: float, info: dict | None = None,
                  ffmpeg: str = "ffmpeg", sinks: dict | None = None):
@@ -202,7 +244,13 @@ class Capture:
             self.events.append((round(t - self.t0, 3), what))
 
     def stop(self, t: float, reason: str, on_done=None) -> None:
-        """End the capture at t; the files are finished on a thread, which then calls on_done(self)."""
+        """End the capture at t; a thread finishes the files and then calls on_done(self).
+
+        Args:
+            t: Monotonic stop time, in seconds.
+            reason: Why the capture ended, recorded in capture.json.
+            on_done: Callable run with the capture once its files are finished, or None.
+        """
         if self.end_t is not None:
             return
         self.end_t, self.reason = float(t), reason

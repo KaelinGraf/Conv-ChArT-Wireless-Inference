@@ -57,7 +57,11 @@ def find_repo():
 
 
 def board_frame(render_board):
-    """Render the 5x5 board under the known pose into a native-resolution frame."""
+    """Render the 5x5 board under the known pose into a native-resolution frame.
+
+    Args:
+        render_board: Board renderer from dcc.board.
+    """
     rng = np.random.default_rng(0)
     board, _ = render_board(480)
     sq = 480 // 5
@@ -83,7 +87,12 @@ def xyzw(q):
 
 
 class Rig:
-    """Hold the node under test plus a probe node that plays the Pi."""
+    """The node under test plus a probe node that plays the Pi.
+
+    Args:
+        node: ConvChartROS node under test.
+        render_board: Board renderer from dcc.board.
+    """
 
     def __init__(self, node, render_board):
         self.node = node
@@ -102,7 +111,12 @@ class Rig:
         self.executor.add_node(self.probe)
 
     def exchange(self, frame, stamp):
-        """Publish a frame until a result carrying its stamp comes back, and return that."""
+        """Publish a frame until a result carrying its stamp comes back, and return that result.
+
+        Args:
+            frame: Mono frame to publish.
+            stamp: (sec, nanosec) header stamp.
+        """
         msg = CompressedImage(format='mono8; png compressed mono8',
                               data=cv2.imencode('.png', frame)[1].tobytes())
         msg.header.stamp.sec, msg.header.stamp.nanosec = stamp

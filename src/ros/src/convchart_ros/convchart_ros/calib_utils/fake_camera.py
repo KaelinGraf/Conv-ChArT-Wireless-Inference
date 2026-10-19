@@ -51,8 +51,17 @@ _CAPTURE_SEED = 1_000_000
 
 
 class FakeCamera(Node):
-    """Synthetic camera serving 'image' (preview stream) and 'image_full_res' (full-resolution
-    GetFullResImage stills).
+    """Synthetic camera serving the 'image' preview stream and 'image_full_res' stills.
+
+    Args:
+        board_spec: Board to render.
+        K_full: (3, 3) camera matrix at full resolution; the ground truth a calibration recovers.
+        dist: Distortion coefficients (OpenCV order); ground truth too.
+        full_size: (W, H) of captures.
+        stream_size: (W, H) of the 'image' stream.
+        rate_hz: Stream rate in Hz.
+        blank_every: Every Nth capture is a blank frame without the board; 0 means never.
+        reply_delay_s: Delay in seconds before a capture is taken and answered.
     """
 
     def __init__(self, board_spec: BoardSpec = BoardSpec(), K_full: ArrayLike = DEFAULT_K_FULL,
@@ -98,17 +107,12 @@ class FakeCamera(Node):
 
     @property
     def pose_index(self) -> int:
-        """
-        Index into poses of the pose the stream shows and the next capture takes.
-        """
+        """Return the index into poses of the pose the stream shows and the next capture takes."""
         with self._lock:
             return self._pose_index
 
     def _publish_frame(self) -> None:
-        """
-        Stream timer: publish the current pose at the stream size. A pose is rendered once and its PNG reused
-        until a capture moves on.
-        """
+        """Publish the current pose at the stream size, reusing its PNG until the pose changes."""
         with self._lock:
             index, cached = self._pose_index, self._stream_png
         if cached is None or cached[0] != index:
@@ -121,9 +125,11 @@ class FakeCamera(Node):
 
     def _capture(self, request: GetFullResImage.Request,
                  response: GetFullResImage.Response) -> GetFullResImage.Response:
-        """
-        'image_full_res' service: a full-resolution still of the current pose taken after the request (and
-        after reply_delay_s), then the next pose. Rendered fresh for each request, so any max_age is met.
+        """Serve a fresh full-resolution still of the current pose, then advance to the next pose.
+
+        Args:
+            request: 'image_full_res' service request.
+            response: Service response to fill and return.
         """
         if self._reply_delay_s > 0:
             time.sleep(self._reply_delay_s)
@@ -160,8 +166,10 @@ class FakeCamera(Node):
 
 
 def _png(frame: np.ndarray) -> array.array:
-    """
-    PNG bytes of a mono8 frame, as the array type a uint8[] message field takes without copying per element.
+    """Return the PNG bytes of a mono8 frame as an array a uint8[] message field takes directly.
+
+    Args:
+        frame: uint8 mono image.
     """
     ok, encoded = cv2.imencode(".png", frame)
     if not ok:
@@ -170,8 +178,10 @@ def _png(frame: np.ndarray) -> array.array:
 
 
 def _load_board_spec(config_path: str) -> BoardSpec:
-    """The board of a config file's CALIBRATION.board block (defaults for whatever is missing).
-    @args: config_path: path of a cfg.yaml.
+    """Return the board of a config file's CALIBRATION.board block, with defaults for missing keys.
+
+    Args:
+        config_path: Path of a cfg.yaml.
     """
     with open(config_path, "r") as file:
         cfg = yaml.safe_load(file) or {}
@@ -179,9 +189,9 @@ def _load_board_spec(config_path: str) -> BoardSpec:
 
 
 def _read_parameters() -> dict[str, Any]:
-    """
-    FakeCamera arguments from the ROS parameters config, rate_hz, blank_every and reply_delay_s, declared on
-    a short-lived node with the camera's name so global and node-scoped overrides both apply.
+    """Return FakeCamera arguments from the ROS parameters, read on a short-lived node.
+
+    Parameters config, rate_hz, blank_every and reply_delay_s; node-scoped overrides apply.
     """
     params = rclpy.create_node(NODE_NAME, start_parameter_services=False, enable_rosout=False)
     try:
@@ -199,9 +209,12 @@ def _read_parameters() -> dict[str, Any]:
 
 
 def main(args: list[str] | None = None) -> None:
-    """
-    Run the fake camera until interrupted. ROS parameters: config (cfg.yaml path; its CALIBRATION.board
-    sets the board), rate_hz, blank_every, reply_delay_s.
+    """Run the fake camera until interrupted.
+
+    ROS parameters: config (cfg.yaml; CALIBRATION.board), rate_hz, blank_every, reply_delay_s.
+
+    Args:
+        args: Command-line arguments for rclpy.init; None uses sys.argv.
     """
     rclpy.init(args=args)
     executor = MultiThreadedExecutor()

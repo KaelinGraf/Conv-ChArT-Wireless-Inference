@@ -30,7 +30,11 @@ PNG_FORMAT = "mono8; png compressed mono8"
 
 
 def frames(source: Path):
-    """Yield the frames of a video file, or of the images in a folder in name order, as mono uint8."""
+    """Yield the frames of a video file, or of the images in a folder in name order, as mono uint8.
+
+    Args:
+        source: Video file or folder of images.
+    """
     if source.is_dir():
         for f in sorted(x for x in source.iterdir() if x.suffix.lower() in IMAGE_EXTS):
             img = cv2.imread(str(f), cv2.IMREAD_GRAYSCALE)
@@ -49,7 +53,13 @@ def frames(source: Path):
 
 
 def fit(img, w: int, h: int):
-    """Centre-crop to 4:3 and area-resize to (w, h), as the camera node's 1600x1200 -> 640x480."""
+    """Centre-crop to 4:3 and area-resize to (w, h), as the camera node's 1600x1200 -> 640x480.
+
+    Args:
+        img: Mono image.
+        w: Output width, in pixels.
+        h: Output height, in pixels.
+    """
     H, W = img.shape
     k = min(W // 4, H // 3)
     img = img[(H - 3 * k) // 2:(H - 3 * k) // 2 + 3 * k, (W - 4 * k) // 2:(W - 4 * k) // 2 + 4 * k]
@@ -121,7 +131,11 @@ class Replay(Node):
 
 
 def main(args=None) -> None:
-    """Run the replay until its last frame. A bad parameter ends it with "replay: <reason>", status 1."""
+    """Run the replay until its last frame; a bad parameter ends it with "replay: <reason>".
+
+    Args:
+        args: Command-line arguments passed to rclpy.init().
+    """
     rclpy.init(args=args)
     try:
         node = Replay()

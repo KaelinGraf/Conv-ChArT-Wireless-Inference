@@ -63,7 +63,14 @@ class ConvChartROS(Node):
     @staticmethod
     def _package_result(img_msg: CompressedImage, result: InferenceResult,
                         square_length_m: float) -> RosInferenceResult:
-        """Pack one InferenceResult (a TypedDict, so a plain dict at runtime) into the ROS message.
+        """Pack one InferenceResult (a plain dict at runtime) into the ROS message.
+
+        Each solved pose carries the measurement noise R at its range; check reason first.
+
+        Args:
+            img_msg: Image the result came from; its header is copied.
+            result: Pipeline result for the image.
+            square_length_m: Board square length, in metres.
         """
         ros_result = RosInferenceResult()
         ros_result.header = img_msg.header
@@ -84,8 +91,11 @@ class ConvChartROS(Node):
 
 
 def to_4x4_matrix(tvec: np.ndarray, rvec: np.ndarray) -> np.ndarray:
-    """
-    Convert translation and rotation vectors to a 4x4 transformation matrix.
+    """Convert translation and rotation vectors to a 4x4 transformation matrix.
+
+    Args:
+        tvec: Translation vector.
+        rvec: Rodrigues rotation vector.
     """
     R, _ = cv2.Rodrigues(rvec)
     T = np.eye(4)
@@ -96,7 +106,15 @@ def to_4x4_matrix(tvec: np.ndarray, rvec: np.ndarray) -> np.ndarray:
 
 def _pack_pose(rvec: np.ndarray | None, tvec: np.ndarray | None,
                square_length_m: float) -> tuple[PoseWithCovariance, bool]:
-    """Pack one PnP solution, returning the pose and whether its covariance is valid."""
+    """Pack one PnP solution, returning the pose and whether its covariance is valid.
+
+    The covariance is the measurement noise at this range; False if no solution or out of range.
+
+    Args:
+        rvec: Rodrigues rotation vector, or None when there is no solution.
+        tvec: Translation vector, or None when there is no solution.
+        square_length_m: Board square length, in metres.
+    """
     pose = PoseWithCovariance()
     if rvec is None or tvec is None:
         return pose, False
@@ -109,9 +127,10 @@ def _pack_pose(rvec: np.ndarray | None, tvec: np.ndarray | None,
 
 
 def main(args=None):
-    """
-    Run the inference node. ROS parameter: config (cfg.yaml path, required). A missing config or
-    an uncalibrated CAMERA block ends it with the line "inference: <reason>" and exit status 1.
+    """Run the inference node; a missing or uncalibrated config ends it with "inference: <reason>".
+
+    Args:
+        args: Command-line arguments passed to rclpy.init().
     """
     rclpy.init(args=args)
     try:

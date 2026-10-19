@@ -59,7 +59,7 @@ def ros():
 
 @pytest.fixture
 def pi_rig(ros, tmp_path):
-    """The Pi's camera node replaying a rendered board, a CalibrateCam, one executor for both."""
+    """Yield a factory that spins the Pi's camera node, replaying a board, with a CalibrateCam."""
     from p4p_camera import camera_node
     spec = BoardSpec()
     rvec, tvec = diverse_poses(spec, DEFAULT_K_FULL, DEFAULT_FULL_SIZE)[0]
